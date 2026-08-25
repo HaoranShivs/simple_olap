@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <unordered_map>
 #include "../datastructs.h"
 #include "../segment/segment.h"
 
@@ -11,7 +12,9 @@ namespace simple_olap
     class StorageManager
     {
     public:
-        StorageManager(TableId table_id, std::filesystem::path path);
+        // sealed_segment_ids: 已写入硬盘的 segment id 列表（新建表传空列表）
+        StorageManager(TableId table_id, std::filesystem::path path, const TableSchema &schema,
+                       const std::vector<SegmentId> &sealed_segment_ids = {});
 
         std::unique_ptr<Scaner> Scan(const ScanRequest &request) const;
 
@@ -19,9 +22,34 @@ namespace simple_olap
 
         void Flush();
 
+        // segment 总数（已落盘 + 内存中待刷盘）
         size_t segment_count() const noexcept
         {
-            return sealed_segments_.size();
+            return on_disk_segments_.size() + sealed_segments_.size();
+        }
+
+        // 已写入硬盘的 segment id 列表
+        const std::vector<SegmentId> &on_disk_segments() const noexcept
+        {
+            return on_disk_segments_;
+        }
+
+        // 内存中待刷盘的 segment id 列表
+        std::vector<SegmentId> sealed_segment_ids() const
+        {
+            std::vector<SegmentId> ids;
+            ids.reserve(sealed_segments_.size());
+            for (const auto &entry : sealed_segments_)
+            {
+                ids.push_back(entry.first);
+            }
+            return ids;
+        }
+
+        // 表数据目录
+        const std::filesystem::path &path() const noexcept
+        {
+            return table_path_;
         }
 
     private:
@@ -34,7 +62,13 @@ namespace simple_olap
 
         std::filesystem::path table_path_;
 
-        std::vector<SegmentMeta> sealed_segments_;
+        TableSchema schema_;
+
+        // 已写入硬盘的 segment id 列表（构造时由 table.meta 载入）
+        std::vector<SegmentId> on_disk_segments_;
+
+        // 内存中待刷盘的 segment：id -> 填满的 SegmentBuilder
+        std::unordered_map<SegmentId, std::unique_ptr<SegmentBuilder>> sealed_segments_;
 
         // append state
         SegmentId active_segment_id_;

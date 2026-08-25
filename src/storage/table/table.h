@@ -44,10 +44,10 @@ namespace simple_olap
         bool Append(const DataChunk &datachunk);
 
     private:
-        Table(const TableMeta *metadata, StorageManager *storage);
+        Table(TableMeta metadata, std::unique_ptr<StorageManager> storage);
 
         TableMeta metadata_;
-        std::unique_ptr<StorageManager> storage_;;
+        std::unique_ptr<StorageManager> storage_;
     };
 
 } // namespace simple_olap

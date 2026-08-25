@@ -1,7 +1,10 @@
 #pragma once
 
 #include <memory>
+#include <optional>
+#include <string_view>
 #include "datastructs.h"
+#include "test_statement.h"
 #include "table/table.h"
 
 namespace simple_olap
@@ -13,12 +16,13 @@ namespace simple_olap
         // 应该不需要。
         // static std::unique_ptr<Catalog> Load(const std::filesystem::path &path);
 
-        // // ---------- Table Managment ----------
+        // ---------- Table Management ----------
 
-        // const std::unique_ptr<Table> FindTable(std::string_view table_name) const;
+        // 查找表：返回 table_id（仅查元数据，不要求表已载入内存），未找到时返回空 optional
+        std::optional<TableId> FindTable(std::string_view table_name) const;
 
-        // 调用Tbale::Create()
-        bool CreateTable(const std::string &table_name, TableSchema schema);
+        // 创建新表：column_id 按列顺序从 0 分配
+        bool CreateTable(const CreateTableStatement &stmt);
 
         bool LoadTable(const std::string &table_name);
 
@@ -44,6 +48,7 @@ namespace simple_olap
     private:
         CatalogMeta metadata_;
         std::unordered_map<uint32_t, std::unique_ptr<Table>> tables_ptr;
+        std::filesystem::path root_path_;
     };
 
 } // namespace simple_olap

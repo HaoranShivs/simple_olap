@@ -13,6 +13,9 @@ namespace simple_olap
     using TableId = uint32_t;
     using ColumnId = uint32_t;
 
+    // 单个 segment 的最大行数，活跃 segment 达到该行数后自动封存
+    constexpr uint32_t kMaxSegmentRowCount = 65536;
+
     struct ColumnSchema
     {
         uint32_t column_id;
@@ -98,13 +101,19 @@ namespace simple_olap
 
         TableSchema schema;
 
-        // std::vector<SegmentMeta> segments;  // warning.
+        // 已封存 segment 的 id 列表（文件命名格式固定，无需记录全名）
+        std::vector<uint32_t> segment_ids;
 
         void Serialize(BinaryWriter &writer) const
         {
             writer.WriteUInt32(table_id);
             writer.WriteString(name);
             schema.Serialize(writer);
+            writer.WriteUInt32(static_cast<uint32_t>(segment_ids.size()));
+            for (uint32_t id : segment_ids)
+            {
+                writer.WriteUInt32(id);
+            }
         }
 
         static TableMeta Deserialize(BinaryReader &reader)
@@ -113,6 +122,12 @@ namespace simple_olap
             meta.table_id = reader.ReadUInt32();
             meta.name = reader.ReadString();
             meta.schema = TableSchema::Deserialize(reader);
+            uint32_t count = reader.ReadUInt32();
+            meta.segment_ids.reserve(count);
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                meta.segment_ids.push_back(reader.ReadUInt32());
+            }
             return meta;
         }
     };

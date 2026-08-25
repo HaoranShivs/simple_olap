@@ -75,17 +75,29 @@ namespace simple_olap
         std::unordered_map<ColumnChunkId, ColumnChunk *> columns_id_ptr_;
     };
 
+    // 列向量视图：指向 DataChunk 中某列数据的轻量描述
+    // 不拥有数据，仅记录数据指针、元素大小和行数
+    // 行数记录是为了给datachunk的 slince功能打补丁
+    struct ColumnVector
+    {
+        const uint8_t *data;
+        size_t element_size;
+        uint32_t row_count;
+    };
+
     class ColumnBuilder
     {
     public:
         explicit ColumnBuilder(const ColumnChunkMeta &metadata);
 
-        void Append(const ColumnVector &column, uint32_t row_count);
+        void Append(const ColumnVector &column);
 
         ColumnChunkMeta Flush(FileWriter &writer);
 
     private:
+        ColumnChunkMeta metadata_;
         uint32_t row_count_;
+        std::vector<uint8_t> data_; // 列数据缓冲，随 Append 动态增长
     };
 
     class SegmentBuilder
@@ -94,6 +106,8 @@ namespace simple_olap
         explicit SegmentBuilder(const TableSchema &schema);
 
         void Append(const DataChunk &batch);
+
+        uint32_t row_count() const { return row_count_; }
 
         SegmentMeta Flush(
             const std::filesystem::path &path);
