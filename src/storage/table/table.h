@@ -37,11 +37,12 @@ namespace simple_olap
         // 获取表头
         const TableSchema &GetSchema() const;
 
-        // 获取表的scaner
-        std::unique_ptr<class TableScaner> Scan(const ScanOptions &options) const;
-
         // 将新的datachunk增加到表的数据中
         bool Append(const DataChunk &datachunk);
+
+        // // 获取表的scaner。
+        // // 除了将SelectStatement根据自身的数据转换为SelectTargetStatement外并传给调用的StorageManager的scan，并返回结果外，什么都不需要作。
+        // std::unique_ptr<class TableScan> Scan(const SelectStatement &options) const;
 
     private:
         Table(TableMeta metadata, std::unique_ptr<StorageManager> storage);

@@ -4,10 +4,12 @@
 #include <unordered_map>
 #include "../datastructs.h"
 #include "../segment/segment.h"
+#include "../test_statement.h"
 
 
 namespace simple_olap
 {
+    class TableScan;
 
     class StorageManager
     {
@@ -16,7 +18,8 @@ namespace simple_olap
         StorageManager(TableId table_id, std::filesystem::path path, const TableSchema &schema,
                        const std::vector<SegmentId> &sealed_segment_ids = {});
 
-        std::unique_ptr<Scaner> Scan(const ScanRequest &request) const;
+        // StorageManager::Scan：接收 id-based 查询请求，返回 TableScan
+        std::unique_ptr<class TableScan> Scan(const SelectTargetStatement &request) const;
 
         void Append(const DataChunk &input);
 
@@ -63,6 +66,8 @@ namespace simple_olap
         std::filesystem::path table_path_;
 
         TableSchema schema_;
+
+        
 
         // 已写入硬盘的 segment id 列表（构造时由 table.meta 载入）
         std::vector<SegmentId> on_disk_segments_;

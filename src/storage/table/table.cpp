@@ -114,4 +114,88 @@ namespace simple_olap
         return file.good();
     }
 
+    const TableSchema &Table::GetSchema() const
+    {
+        return metadata_.schema;
+    }
+
+    std::unique_ptr<class TableScan> Table::Scan(const SelectStatement &options) const
+    {
+        // 1. 将 name-based SelectStatement 转为 id-based SelectTargetStatement
+        SelectTargetStatement target;
+        target.table_id = metadata_.table_id;
+
+        // 2. select_list -> target_list（column_name -> column_id）
+        target.target_list.reserve(options.select_list.size());
+        for (const auto &item : options.select_list)
+        {
+            // 按列名查找 column_id
+            ColumnId col_id = UINT32_MAX;
+            for (const auto &col : metadata_.schema.columns)
+            {
+                if (col.name == item.column_name)
+                {
+                    col_id = col.column_id;
+                    break;
+                }
+            }
+            if (col_id == UINT32_MAX)
+            {
+                // 列名不存在，返回 nullptr
+                return nullptr;
+            }
+            target.target_list.push_back({col_id, item.op});
+        }
+
+        // 3. where 条件转换（column_name -> column_id）
+        if (options.where)
+        {
+            ColumnId col_id = UINT32_MAX;
+            for (const auto &col : metadata_.schema.columns)
+            {
+                if (col.name == options.where->column_name)
+                {
+                    col_id = col.column_id;
+                    break;
+                }
+            }
+            if (col_id == UINT32_MAX)
+            {
+                return nullptr;
+            }
+            auto where_target = std::make_unique<ExprTarget>();
+            where_target->column_id = col_id;
+            where_target->op = options.where->op;
+            where_target->value = options.where->value;
+            target.where = std::move(where_target);
+        }
+
+        // 4. group_by 转换（column_name -> column_id）
+        target.group_by.reserve(options.group_by.size());
+        for (const auto &expr : options.group_by)
+        {
+            ColumnId col_id = UINT32_MAX;
+            for (const auto &col : metadata_.schema.columns)
+            {
+                if (col.name == expr->column_name)
+                {
+                    col_id = col.column_id;
+                    break;
+                }
+            }
+            if (col_id == UINT32_MAX)
+            {
+                return nullptr;
+            }
+            auto group_target = std::make_unique<ExprTarget>();
+            group_target->column_id = col_id;
+            group_target->op = expr->op;
+            group_target->value = expr->value;
+            target.group_by.push_back(std::move(group_target));
+        }
+
+        // 5. 委托给 StorageManager::Scan
+        return storage_->Scan(target);
+    }
+
 } // namespace simple_olap

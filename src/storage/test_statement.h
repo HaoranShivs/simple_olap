@@ -46,6 +46,30 @@ namespace simple_olap
             rows;
     };
 
+    enum class AggType: uint8_t{
+        INVALID = 0,
+        SUM,    // 求和
+        COUNT,  // 计数
+        AVG,    // 平均值（内部用 SUM + COUNT 实现）
+        MIN,    // 最小值
+        MAX     // 最大值 
+    };
+
+    struct SelectItem{
+        std::string column_name;
+        AggType op;  
+    };
+
+    enum class CmpOp : uint8_t {
+        EQ, NE, GT, GE, LT, LE
+    };
+
+    struct Expression{
+        std::string column_name;
+        CmpOp op;
+        int32_t value;
+    };
+
     // SELECT
     struct SelectStatement
     {
@@ -57,6 +81,32 @@ namespace simple_olap
 
         std::vector<std::unique_ptr<Expression>>
             group_by;
+    };
+
+    // ---------- ID-based versions of SELECT statements ----------
+
+    struct SelectTarget
+    {
+        ColumnId column_id;
+        AggType op;
+    };
+
+    struct ExprTarget
+    {
+        ColumnId column_id;
+        CmpOp op;
+        int32_t value;
+    };
+
+    struct SelectTargetStatement
+    {
+        TableId table_id;
+
+        std::vector<SelectTarget> target_list;
+
+        std::unique_ptr<ExprTarget> where;
+
+        std::vector<std::unique_ptr<ExprTarget>> group_by;
     };
 
     // 然后关键来了：

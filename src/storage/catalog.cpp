@@ -220,4 +220,26 @@ namespace simple_olap
         return true;
     }
 
+    Table *Catalog::GetTable(const std::string &table_name)
+    {
+        // 1. 查元数据获取 table_id，不存在返回 nullptr
+        std::optional<TableId> id = FindTable(table_name);
+        if (!id.has_value())
+        {
+            return nullptr;
+        }
+
+        // 2. 未载入内存则自动从硬盘打开
+        if (tables_ptr.count(*id) == 0)
+        {
+            if (!LoadTable(table_name))
+            {
+                return nullptr;
+            }
+        }
+
+        // 3. 返回表指针（生命周期由 tables_ptr 持有）
+        return tables_ptr[*id].get();
+    }
+
 } // namespace simple_olap
