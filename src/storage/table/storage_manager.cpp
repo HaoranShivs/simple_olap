@@ -70,4 +70,20 @@ namespace simple_olap
         active_segment_ = std::make_unique<SegmentBuilder>(schema_);
     }
 
+    SegmentBuilder* StorageManager::FindSegmentById(SegmentId id) noexcept
+    {
+        // 1. 先在待刷盘 map 中查找
+        auto it = sealed_segments_.find(id);
+        if (it != sealed_segments_.end())
+        {
+            return it->second.get();
+        }
+
+        // 2. 已落盘 segment 暂不支持（Segment::Open 未实现）
+        // 未来可在此处从硬盘加载
+
+        // 3. 不查 active_segment_（它代表未完成编辑的文件）
+        return nullptr;
+    }
+
 } // namespace simple_olap

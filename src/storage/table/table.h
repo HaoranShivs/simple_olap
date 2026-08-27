@@ -1,10 +1,20 @@
 #pragma once
 
+#include <memory>
+#include <vector>
 #include "storage_manager.h"
 #include "../datachunk.h"
+#include "../../execution/vector/vector.h"
 
 namespace simple_olap
 {
+    // 扫描游标：记录当前读取位置
+    struct ScanCursor
+    {
+        SegmentId segment_id = 0;   // 当前 segment id
+        uint32_t offset_in_segment = 0; // 在当前 segment 内的行偏移
+    };
+
     struct ScanOptions
     {
         uint64_t start_row = 0;        // 起始行
@@ -40,9 +50,11 @@ namespace simple_olap
         // 将新的datachunk增加到表的数据中
         bool Append(const DataChunk &datachunk);
 
-        // // 获取表的scaner。
-        // // 除了将SelectStatement根据自身的数据转换为SelectTargetStatement外并传给调用的StorageManager的scan，并返回结果外，什么都不需要作。
-        // std::unique_ptr<class TableScan> Scan(const SelectStatement &options) const;
+        // 从table中获取一个提取数据的VectorBatch
+        // @param request，所有扫描需要的信息
+        // @param cursor，记录扫描到了哪个segment，哪行
+        // @param output，用来保存提取的结果
+        bool GetVectorBatch(const SelectTargetStatement &request, ScanCursor &cursor, VectorBatch &output);
 
     private:
         Table(TableMeta metadata, std::unique_ptr<StorageManager> storage);
