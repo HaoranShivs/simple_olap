@@ -44,7 +44,7 @@ namespace simple_olap
 
         // 3. 创建 StorageManager（构造时立即创建空 SegmentBuilder）
         auto storage = std::make_unique<StorageManager>(
-            metadata.table_id, table_path, metadata.schema);
+            metadata.table_id, table_path, metadata);
 
         // 4. 构造 Table
         return std::unique_ptr<Table>(new Table(metadata, std::move(storage)));
@@ -73,9 +73,9 @@ namespace simple_olap
             return nullptr;
         }
 
-        // 3. 用已封存 segment 的 id 列表构造 StorageManager
+        // 3. 用表元数据（含已落盘 segment id 列表）构造 StorageManager
         auto storage = std::make_unique<StorageManager>(
-            table_id, table_path, metadata.schema, metadata.segment_ids);
+            table_id, table_path, metadata);
 
         // 4. 构造 Table
         return std::unique_ptr<Table>(new Table(std::move(metadata), std::move(storage)));
@@ -93,8 +93,9 @@ namespace simple_olap
         // 1. 写回数据：将内存中待刷盘的 segment 写盘
         storage_->Flush();
 
-        // 2. 修改元数据：把已落盘的 segment 登记进 table_meta
-        metadata_.segment_ids = storage_->on_disk_segments();
+        // 2. 修改元数据：StorageManager 落盘时已把 segment id 登记进自己的 TableMeta，
+        // 这里同步回上层 Table 的元数据
+        metadata_.segment_ids = storage_->table_meta().segment_ids;
 
         // 3. 写回元数据：table_path / table.meta
         BinaryWriter writer;
@@ -119,83 +120,10 @@ namespace simple_olap
         return metadata_.schema;
     }
 
-    std::unique_ptr<class TableScan> Table::Scan(const SelectStatement &options) const
+    bool Table::GetVectorBatch(const SelectTargetStatement &request, ScanCursor &cursor, VectorBatch &output)
     {
-        // 1. 将 name-based SelectStatement 转为 id-based SelectTargetStatement
-        SelectTargetStatement target;
-        target.table_id = metadata_.table_id;
-
-        // 2. select_list -> target_list（column_name -> column_id）
-        target.target_list.reserve(options.select_list.size());
-        for (const auto &item : options.select_list)
-        {
-            // 按列名查找 column_id
-            ColumnId col_id = UINT32_MAX;
-            for (const auto &col : metadata_.schema.columns)
-            {
-                if (col.name == item.column_name)
-                {
-                    col_id = col.column_id;
-                    break;
-                }
-            }
-            if (col_id == UINT32_MAX)
-            {
-                // 列名不存在，返回 nullptr
-                return nullptr;
-            }
-            target.target_list.push_back({col_id, item.op});
-        }
-
-        // 3. where 条件转换（column_name -> column_id）
-        if (options.where)
-        {
-            ColumnId col_id = UINT32_MAX;
-            for (const auto &col : metadata_.schema.columns)
-            {
-                if (col.name == options.where->column_name)
-                {
-                    col_id = col.column_id;
-                    break;
-                }
-            }
-            if (col_id == UINT32_MAX)
-            {
-                return nullptr;
-            }
-            auto where_target = std::make_unique<ExprTarget>();
-            where_target->column_id = col_id;
-            where_target->op = options.where->op;
-            where_target->value = options.where->value;
-            target.where = std::move(where_target);
-        }
-
-        // 4. group_by 转换（column_name -> column_id）
-        target.group_by.reserve(options.group_by.size());
-        for (const auto &expr : options.group_by)
-        {
-            ColumnId col_id = UINT32_MAX;
-            for (const auto &col : metadata_.schema.columns)
-            {
-                if (col.name == expr->column_name)
-                {
-                    col_id = col.column_id;
-                    break;
-                }
-            }
-            if (col_id == UINT32_MAX)
-            {
-                return nullptr;
-            }
-            auto group_target = std::make_unique<ExprTarget>();
-            group_target->column_id = col_id;
-            group_target->op = expr->op;
-            group_target->value = expr->value;
-            target.group_by.push_back(std::move(group_target));
-        }
-
-        // 5. 委托给 StorageManager::Scan
-        return storage_->Scan(target);
+        // 委托给 StorageManager，由其跨 segment 推进游标并提取数据
+        return storage_->GetVectorBatch(request, cursor, output);
     }
 
 } // namespace simple_olap

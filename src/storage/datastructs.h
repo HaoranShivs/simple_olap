@@ -5,6 +5,7 @@
 #include <vector>
 #include <map>
 #include <filesystem>
+#include <variant>
 #include "../type.h"
 #include "serialization.h"
 
@@ -12,9 +13,38 @@ namespace simple_olap
 {
     using TableId = uint32_t;
     using ColumnId = uint32_t;
+    using SegmentId = uint32_t;
 
     // 单个 segment 的最大行数，活跃 segment 达到该行数后自动封存
     constexpr uint32_t kMaxSegmentRowCount = 65536;
+
+    enum class CmpOp : uint8_t {
+        EQ, NE, GT, GE, LT, LE
+    };
+
+    // 扫描游标：记录当前读取位置
+    struct ScanCursor
+    {
+        SegmentId segment_id = 0;       // 当前 segment id
+        uint32_t offset_in_segment = 0; // 在当前 segment 内的行偏移
+    };
+
+    struct Condition
+    {
+        ColumnId column = 0;
+        CmpOp op = CmpOp::EQ;
+        std::variant<int32_t, int64_t, double, std::string> value;
+    };
+
+    struct ScanOptions
+    {
+        uint64_t start_row = 0;        // 起始行
+        uint64_t end_row = UINT64_MAX; // 结束行
+        std::vector<ColumnId> columns; // 需要读取的列，空表示全部
+        // 过滤条件；has_where 为 false 时忽略 cond
+        bool has_where = false;
+        Condition cond;
+    };
 
     struct ColumnSchema
     {
@@ -140,19 +170,23 @@ namespace simple_olap
 
         uint64_t data_offset;
 
-        /* 暂时忽略
-        max_value;
-        
-        min_value;
+        // 列内数值的最大/最小值，用于 segment 级 min/max 剪枝（见 SegmentReader::GetVectorBatch）。
+        // 以 double 统一存储（INT32/INT64/FLOAT/DOUBLE 均可无损或近似表示）；
+        // has_stats 为 false 表示无统计信息（如 VARCHAR 列或空列），剪枝时跳过该条件。
+        bool has_stats;
 
-        EncodingType encoding;
-        */
+        double min_value;
+
+        double max_value;
 
         void Serialize(BinaryWriter &writer) const
         {
             writer.WriteUInt32(column_id);
             writer.WriteUInt8(static_cast<uint8_t>(type));
             writer.WriteUInt64(data_offset);
+            writer.WriteUInt8(has_stats ? 1 : 0);
+            writer.WriteDouble(min_value);
+            writer.WriteDouble(max_value);
         }
 
         static ColumnChunkMeta Deserialize(BinaryReader &reader)
@@ -161,6 +195,9 @@ namespace simple_olap
             meta.column_id = reader.ReadUInt32();
             meta.type = static_cast<DataType>(reader.ReadUInt8());
             meta.data_offset = reader.ReadUInt64();
+            meta.has_stats = reader.ReadUInt8() != 0;
+            meta.min_value = reader.ReadDouble();
+            meta.max_value = reader.ReadDouble();
             return meta;
         }
     };

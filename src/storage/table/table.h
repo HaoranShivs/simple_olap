@@ -6,24 +6,9 @@
 #include "../datachunk.h"
 #include "../../execution/vector/vector.h"
 
+
 namespace simple_olap
 {
-    // 扫描游标：记录当前读取位置
-    struct ScanCursor
-    {
-        SegmentId segment_id = 0;   // 当前 segment id
-        uint32_t offset_in_segment = 0; // 在当前 segment 内的行偏移
-    };
-
-    struct ScanOptions
-    {
-        uint64_t start_row = 0;        // 起始行
-        uint64_t end_row = UINT64_MAX; // 结束行
-        std::vector<ColumnId> columns; // 需要读取的列，空表示全部
-        // 过滤条件
-        // codition
-    };
-
     class Table
     {
     public:

@@ -1,10 +1,11 @@
 #include "segment.h"
 
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 
+#include "../../execution/vector/vector.h"
 #include "../file/filewriter.h"
-
 
 namespace simple_olap
 {
@@ -105,6 +106,135 @@ namespace simple_olap
         }
         // 未找到列：返回空视图
         return ColumnChunkReader::CreateFromBuilder(ColumnChunkMeta{}, nullptr, 0, 0);
+    }
+
+    // 从 Condition 的 variant 值中提取 double（仅数值比较；字符串返回 false）
+    static bool CondValueAsDouble(const Condition &cond, double &out)
+    {
+        if (std::holds_alternative<int32_t>(cond.value))
+        {
+            out = static_cast<double>(std::get<int32_t>(cond.value));
+            return true;
+        }
+        if (std::holds_alternative<int64_t>(cond.value))
+        {
+            out = static_cast<double>(std::get<int64_t>(cond.value));
+            return true;
+        }
+        if (std::holds_alternative<double>(cond.value))
+        {
+            out = std::get<double>(cond.value);
+            return true;
+        }
+        return false; // VARCHAR 条件无法用 min/max 剪枝
+    }
+
+    // segment 级 min/max 剪枝：根据列统计信息判断整个 segment 是否可能命中条件。
+    // 返回 true 表示可以安全跳过本 segment（无行能满足条件）。
+    static bool CanPruneByStats(const ColumnChunkMeta &meta, const Condition &cond)
+    {
+        // 无统计信息（VARCHAR / 空列）时保守地不剪枝
+        if (!meta.has_stats)
+        {
+            return false;
+        }
+        double v = 0.0;
+        if (!CondValueAsDouble(cond, v))
+        {
+            return false;
+        }
+
+        switch (cond.op)
+        {
+        case CmpOp::EQ:
+            // 值落在 [min, max] 之外则不可能相等
+            return v < meta.min_value || v > meta.max_value;
+        case CmpOp::NE:
+            // 列内所有值都等于比较值，则没有行能满足 !=
+            return meta.min_value == v && meta.max_value == v;
+        case CmpOp::GT:
+            // 最大值都不大于比较值
+            return meta.max_value <= v;
+        case CmpOp::GE:
+            return meta.max_value < v;
+        case CmpOp::LT:
+            // 最小值都不小于比较值
+            return meta.min_value >= v;
+        case CmpOp::LE:
+            return meta.min_value > v;
+        }
+        return false;
+    }
+
+    bool SegmentReader::GetVectorBatch(const ScanOptions &scanoptions, uint32_t offset,
+                                       VectorBatch &output)
+    {
+        // ============ 1. min/max 剪枝 ============
+        // 仅在 segment 起点（offset == 0）时检查一次，避免每批都重复判断
+        if (offset == 0 && scanoptions.has_where)
+        {
+            const ColumnChunkMeta &cond_meta = GetColumnMeta(scanoptions.cond.column);
+            if (CanPruneByStats(cond_meta, scanoptions.cond))
+            {
+                // 整个 segment 都不可能有满足条件的行，直接跳过
+                return false;
+            }
+        }
+
+        // ============ 2. 批量扫描 ============
+        const uint32_t segment_rows = metadata_.row_count;
+        if (offset >= segment_rows)
+        {
+            // 已越过 segment 末尾，无数据可读
+            return false;
+        }
+
+        // 本次扫描行数：从 offset 起最多 VectorBatch::BATCH_SIZE（1024）行
+        const uint32_t scan_count =
+            std::min(static_cast<uint32_t>(VectorBatch::BATCH_SIZE), segment_rows - offset);
+
+        // 待输出的列集合：scanoptions.columns 为空表示输出全部列
+        std::vector<ColumnId> out_columns;
+        if (scanoptions.columns.empty())
+        {
+            out_columns.reserve(metadata_.col_chunk_metas_.size());
+            for (const auto &chunk_meta : metadata_.col_chunk_metas_)
+            {
+                out_columns.push_back(chunk_meta.column_id);
+            }
+        }
+        else
+        {
+            out_columns = scanoptions.columns;
+        }
+
+        // 重建 output 的列结构（列顺序与 out_columns 一致）
+        output.columns.clear();
+        output.sel_vector.clear();
+        output.size = 0;
+        for (ColumnId col_id : out_columns)
+        {
+            output.AddColumn(GetColumnMeta(col_id).type);
+        }
+
+        // 逐列从列块中拷贝 [offset, offset + scan_count) 行
+        for (size_t i = 0; i < out_columns.size(); ++i)
+        {
+            const ColumnChunkReader chunk = OpenColumn(out_columns[i]);
+            const ColumnChunkMeta &chunk_meta = chunk.metadata();
+            const size_t elem_size = TypeElemSize(chunk_meta.type);
+
+            // 列块数据在映射区内连续，直接定位到起始行后整段拷贝
+            const std::byte *col_start = chunk.data() + static_cast<uint64_t>(offset) * elem_size;
+
+            auto &col_data = output.columns[i];
+            col_data.type = chunk_meta.type;
+            // col_data.bit_map.clear();
+            col_data.CopyFrom(col_start, scan_count, true);
+        }
+
+        output.size = scan_count;
+        return scan_count > 0;
     }
 
     // ==========================================

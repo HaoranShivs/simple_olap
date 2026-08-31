@@ -60,9 +60,7 @@ namespace simple_olap
         AggType op;  
     };
 
-    enum class CmpOp : uint8_t {
-        EQ, NE, GT, GE, LT, LE
-    };
+    // CmpOp 定义于 datastructs.h
 
     struct Expression{
         std::string column_name;
@@ -77,9 +75,9 @@ namespace simple_olap
 
         std::vector<SelectItem> select_list;
 
-        std::unique_ptr<Expression> where;
+        Expression* where;
 
-        std::vector<std::unique_ptr<Expression>>
+        std::vector<Expression*>
             group_by;
     };
 

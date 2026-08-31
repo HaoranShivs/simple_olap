@@ -9,8 +9,7 @@
 
 namespace simple_olap
 {
-    using SegmentId = uint32_t;
-
+    // SegmentId / ScanOptions 定义于 ../datastructs.h
     class VectorBatch;
 
     class SegmentReader
@@ -30,7 +29,10 @@ namespace simple_olap
 
         const ColumnChunkMeta &GetColumnMeta(ColumnId id) const noexcept;
 
-        bool GetVectorBatch(VectorBatch &output);
+        // 大致步骤：
+        // 1. 检查 scanoptions 中的where条件和对应的列的metadata，其中记录着最大值和最小值，根据这个可以判断列是否符合条件。当然不是每次运行都进行检查，只有当offset==0时才进行。
+        // 2.以offset为segment内部的起点，扫描 1024（预先设置的值）行所要求列的数据到output
+        bool GetVectorBatch(const ScanOptions &scanoptions, uint32_t offset, VectorBatch &output);
 
     private:
         SegmentReader(uint64_t segment_id, SegmentMeta matedata, MappedFile file);

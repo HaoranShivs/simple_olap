@@ -33,8 +33,14 @@ namespace simple_olap
         // segment 总数（已落盘 + 内存中待刷盘）
         size_t segment_count() const noexcept
         {
-            // return on_disk_segments_.size() + sealed_segments_.size();
+            return table_meta_.segment_ids.size() + sealed_segments_.size();
         }
+
+        // 表元数据（含已落盘 segment id 列表），供上层 Table 同步/持久化
+        const TableMeta &table_meta() const noexcept { return table_meta_; }
+
+        // 表数据目录
+        const std::filesystem::path &path() const noexcept { return table_path_; }
 
         // 内存中待刷盘的 segment id 列表
         std::vector<SegmentId> sealed_segment_ids() const
@@ -53,15 +59,19 @@ namespace simple_olap
 
         void CreateActiveSegment();
 
-        // identity
-        TableMeta table_id_;
+        // identity：表元数据；已落盘 segment 的 id 直接记录在 table_meta_.segment_ids 中
+        TableMeta table_meta_;
 
         std::filesystem::path table_path_;
 
-        TableSchema &metadata_; // 与上层Table的metadata绑定
-
         // 内存中待刷盘的 segment：id -> 填满的 SegmentBuilder
         std::unordered_map<SegmentId, std::unique_ptr<SegmentBuilder>> sealed_segments_;
+
+        // 已落盘 segment 的只读视图缓存：id -> SegmentReader（懒加载，避免重复 mmap）
+        std::unordered_map<SegmentId, std::unique_ptr<SegmentReader>> reader_cache_;
+
+        // 获取（必要时打开）指定 id 的 SegmentReader；失败返回 nullptr
+        SegmentReader *GetSegmentReader(SegmentId id);
 
         // append state
         SegmentId active_segment_id_;
