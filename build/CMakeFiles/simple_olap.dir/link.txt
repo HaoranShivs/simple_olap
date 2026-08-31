@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG CMakeFiles/simple_olap.dir/src/main.cpp.o -o bin/simple_olap  lib/libsimple_olap_core.a

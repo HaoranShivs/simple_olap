@@ -1,3 +1,7 @@
+#pragma once
+
+#include "vector/vector.h"
+
 namespace simple_olap
 {
     /// @brief 算子抽象基类（Pull-based Volcano 模型）

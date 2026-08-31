@@ -1,0 +1,4 @@
+/home/orangepi3/Projects/simple_olap/build/CMakeFiles/simple_olap_core.dir
+/home/orangepi3/Projects/simple_olap/build/CMakeFiles/simple_olap.dir
+/home/orangepi3/Projects/simple_olap/build/CMakeFiles/edit_cache.dir
+/home/orangepi3/Projects/simple_olap/build/CMakeFiles/rebuild_cache.dir

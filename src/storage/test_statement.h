@@ -16,19 +16,6 @@ namespace simple_olap
         std::vector<ColumnDefinition> columns;
     };
 
-    // CREATE TABLE 
-    struct ColumnDefinition
-    {
-        std::string name;
-        DataType type;
-    };
-
-    struct CreateTableStatement
-    {
-        std::string table_name;
-        std::vector<ColumnDefinition> columns;
-    };
-
     // INSERT
     using LiteralValue =
         std::variant<

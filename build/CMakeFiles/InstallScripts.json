@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/orangepi3/Projects/simple_olap/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
