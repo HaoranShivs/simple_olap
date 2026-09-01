@@ -4,6 +4,7 @@
 # PROJECT_SOURCES at CMakeLists.txt:26 (file)
 file(GLOB_RECURSE NEW_GLOB LIST_DIRECTORIES false "/home/orangepi3/Projects/simple_olap/src/*.cpp")
 set(OLD_GLOB
+  "/home/orangepi3/Projects/simple_olap/src/execution/aggregate/aggregate.cpp"
   "/home/orangepi3/Projects/simple_olap/src/execution/scan/scan.cpp"
   "/home/orangepi3/Projects/simple_olap/src/execution/vector/vector.cpp"
   "/home/orangepi3/Projects/simple_olap/src/main.cpp"
