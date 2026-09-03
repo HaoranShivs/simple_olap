@@ -1,4 +1,4 @@
-#include "token.h"
+#include "../token.h"
 #include <vector>
 
 namespace simple_olap

@@ -5,7 +5,7 @@
 #include <unordered_map>
 #include "../datastructs.h"
 #include "../segment/segment.h"
-#include "../test_statement.h"
+#include "../scan_request.h"
 
 
 namespace simple_olap

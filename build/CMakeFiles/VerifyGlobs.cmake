@@ -9,6 +9,7 @@ set(OLD_GLOB
   "/home/orangepi3/Projects/simple_olap/src/execution/vector/vector.cpp"
   "/home/orangepi3/Projects/simple_olap/src/main.cpp"
   "/home/orangepi3/Projects/simple_olap/src/planner/binder.cpp"
+  "/home/orangepi3/Projects/simple_olap/src/sql/ast/boundexpr.cpp"
   "/home/orangepi3/Projects/simple_olap/src/sql/ast/statement.cpp"
   "/home/orangepi3/Projects/simple_olap/src/sql/lexer/lexer.cpp"
   "/home/orangepi3/Projects/simple_olap/src/sql/main_test.cpp"

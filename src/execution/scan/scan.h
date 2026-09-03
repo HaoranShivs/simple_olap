@@ -30,8 +30,8 @@ namespace simple_olap
                                      const std::string &column_name);
 
     private:
-        // 初始化
-        const SelectStatement selectstat_;
+        // 初始化（SelectStatement 含 unique_ptr 成员不可拷贝，存指针）
+        const SelectStatement *selectstat_;
         // GetTable 是非 const 方法（可能触发 LoadTable），因此不能是 const 指针
         Catalog *catalog_;
         // Table::GetVectorBatch 是非 const 方法，因此不能是 const 指针

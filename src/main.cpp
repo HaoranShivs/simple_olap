@@ -134,7 +134,7 @@ namespace
         select.select_list.emplace_back(
             std::make_unique<ColumnRefExpr>("score"));
         select.where_clause = std::move(where);
-        select.group_by = {};
+        // group_by 为空，使用默认构造，避免对 unique_ptr 的拷贝赋值
 
         TableScan scan(select, &catalog);
         scan.Init();

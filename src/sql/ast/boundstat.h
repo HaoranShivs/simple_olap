@@ -15,8 +15,6 @@ namespace simple_olap
     class BoundCreateTableStatement;
     class BoundStatementVisitor;
 
-    using BoundStatementPtr = std::unique_ptr<BoundStatement>;
-
     // ==========================================
     // 1. Bound Statement 基类
     // ==========================================
@@ -46,6 +44,8 @@ namespace simple_olap
     protected:
         Type type_;
     };
+
+    using BoundStatementPtr = std::unique_ptr<BoundStatement>;
 
     /// @brief SELECT 子句中的单个投影项 (例如: age, COUNT(*) AS total)
     struct BoundSelectItem

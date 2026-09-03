@@ -281,15 +281,15 @@ j));
     }
 
     // 4. 聚合合法性校验 (OLAP 必须)
-    void Binder::ValidateAggregations(const std::vector<std::unique_ptr<BoundExpr>> &select_list,
+    void Binder::ValidateAggregations(const std::vector<BoundSelectItem> &select_list,
                                       const std::vector<std::unique_ptr<BoundExpr>> &group_by)
     {
         bool has_group_by = !group_by.empty();
-        for (const auto &expr : select_list)
+        for (const auto &item : select_list)
         {
-            if (!IsAggregate(*expr) && has_group_by)
+            if (!IsAggregate(*item.expr) && has_group_by)
             {
-                if (!IsInGroupBy(*expr, group_by))
+                if (!IsInGroupBy(*item.expr, group_by))
                 {
                     throw SemanticException("SELECT column must appear in GROUP BY clause.");
                 }
@@ -348,20 +348,20 @@ j));
         context_->tables_.push_back(std::move(bound));
     }
 
-    std::vector<BndExprPtr> Binder::BindSelectList(std::vector<SelectItem> select_list)
+    std::vector<BoundSelectItem> Binder::BindSelectList(const std::vector<SelectItem> &select_list)
     {
-        std::vector<BndExprPtr> bound_list;
+        std::vector<BoundSelectItem> bound_list;
         bound_list.reserve(select_list.size());
 
-        for (auto &item : select_list)
+        for (const auto &item : select_list)
         {
-            // SelectItem 持有 AST 表达式 (ExprPtr)，递归绑定成 BoundExpr
-            bound_list.push_back(BindExpr(*item.expr));
+            // SelectItem 持有 AST 表达式 (ExprPtr)，递归绑定成 BoundExpr，并保留别名
+            bound_list.emplace_back(BindExpr(*item.expr), item.alias);
         }
         return bound_list;
     }
 
-    std::vector<BndExprPtr> Binder::BindGroupBy(std::vector<ExprPtr> group_by)
+    std::vector<BndExprPtr> Binder::BindGroupBy(const std::vector<ExprPtr> &group_by)
     {
         std::vector<BndExprPtr> bound_list;
         bound_list.reserve(group_by.size());

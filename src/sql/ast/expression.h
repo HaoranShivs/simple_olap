@@ -5,23 +5,17 @@
 #include <string>
 #include <variant>
 
-namespace simple_olap
+#include "../../type.h" // AgType 定义于公共层 type.h
+
+namespace
+simple_olap
 {
 
     // 前向声明
     struct Expr;
     using ExprPtr = std::unique_ptr<Expr>;
 
-    /// @brief 聚合函数类型
-    enum class AggType : uint8_t
-    {
-        INVALID = 0,
-        SUM,   // 求和
-        COUNT, // 计数
-        AVG,   // 平均值（内部用 SUM + COUNT 实现）
-        MIN,   // 最小值
-        MAX    // 最大值
-    };
+    // AggType 已迁移至 src/type.h（公共层），此处不再重复定义
 
     /// @brief 表达式基类：所有表达式的抽象
     struct Expr
