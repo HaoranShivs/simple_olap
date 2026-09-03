@@ -18,9 +18,7 @@ namespace simple_olap
     // 单个 segment 的最大行数，活跃 segment 达到该行数后自动封存
     constexpr uint32_t kMaxSegmentRowCount = 65536;
 
-    enum class CmpOp : uint8_t {
-        EQ, NE, GT, GE, LT, LE
-    };
+    // CmpOp 定义在 type.h（公共层），此处不再重复定义
 
     // 扫描游标：记录当前读取位置
     struct ScanCursor

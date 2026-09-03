@@ -4,7 +4,7 @@
 #include "../../storage/table/table.h"
 #include "../vector/vector.h"
 #include "../../storage/catalog.h"
-#include "../../storage/test_statement.h"
+#include "../../sql/ast/statement.h"
 #include <string>
 #include <vector>
 

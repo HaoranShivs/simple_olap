@@ -1,21 +1,17 @@
+#pragma once
+
 #include <memory>
 #include <variant>
-#include "expression.h"
 #include <vector>
 #include <string>
 #include <optional>
 
+#include "../../type.h"
+#include "expression.h"
+
 namespace simple_olap
 {
-    // 基础数据类型枚举 (OLAP 强依赖类型进行向量化计算)
-    enum class DataType
-    {
-        INVALID,
-        INT32,
-        INT64,
-        DOUBLE,
-        VARCHAR
-    };
+    // DataType 统一定义在 type.h（公共层），此处不再重复定义
 
     // 绑定后的表达式基类
     class BoundExpr

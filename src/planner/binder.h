@@ -49,29 +49,30 @@ namespace simple_olap
         explicit Binder(Catalog &catalog) : catalog_(catalog) {}
 
         // 1. 总入口
-        BoundStatementPtr BindStatement(const Statement& stmt) {
-        switch (stmt.GetType()) {
+        BoundStatementPtr BindStatement(const Statement &stmt)
+        {
+            switch (stmt.GetType())
+            {
             case Statement::Type::SELECT:
-                return BindSelect(static_cast<const SelectStatement&>(stmt));
-            
+                return BindSelect(static_cast<const SelectStatement &>(stmt));
+
             case Statement::Type::INSERT:
-                return BindInsert(static_cast<const InsertStatement&>(stmt));
-            
+                return BindInsert(static_cast<const InsertStatement &>(stmt));
+
             case Statement::Type::CREATE_TABLE:
-                return BindCreateTable(static_cast<const CreateTableStatement&>(stmt));
-            
+                return BindCreateTable(static_cast<const CreateTableStatement &>(stmt));
+
             default:
                 throw SemanticException("Unsupported statement type");
+            }
         }
-    }
 
     private:
-        std::unique_ptr<BoundSelectStatement> BindSelect(const SelectStatement &stmt);
+        BoundStatementPtr BindSelect(const SelectStatement &stmt);
 
-        std::unique_ptr<BoundInsertStatement> BindInsert(const SelectStatement &stmt);
+        BoundStatementPtr BindInsert(const InsertStatement &stmt);
 
-        std::unique_ptr<BoundCreateTableStatement> BindCreateTable(const SelectStatement &stmt);
-
+        BoundStatementPtr BindCreateTable(const CreateTableStatement &stmt);
         // 2. 表达式绑定接口
         std::unique_ptr<BoundExpr> BindExpr(const Expr &expr);
 

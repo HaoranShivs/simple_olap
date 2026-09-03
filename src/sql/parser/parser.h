@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "../../storage/datastructs.h"
 #include "../token.h"
 #include "../ast/expression.h"
 #include "../ast/statement.h"
@@ -43,6 +44,10 @@ namespace simple_olap
         /// @brief 解析基本（原子）表达式。作为 ParseExpression 的底层递归基，处理数字/字符串字面量、
         /// 列名标识符、函数调用（如 COUNT(a)）、以及括号包裹的子表达式 (a + b)。
         ExprPtr ParsePrimaryExpression();
+
+        /// @brief 解析列的数据类型（INT / BIGINT / FLOAT / DOUBLE / VARCHAR），
+        /// 用于 CREATE TABLE 的列定义。
+        DataType ParseDataType();
 
         // ---------- Token 流操作 ----------
 

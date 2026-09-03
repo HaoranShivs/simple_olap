@@ -12,17 +12,6 @@ namespace simple_olap
     struct Expr;
     using ExprPtr = std::unique_ptr<Expr>;
 
-    /// @brief 比较运算符
-    enum class CmpOp : uint8_t
-    {
-        EQ,
-        NE,
-        GT,
-        GE,
-        LT,
-        LE
-    };
-
     /// @brief 聚合函数类型
     enum class AggType : uint8_t
     {
@@ -49,6 +38,9 @@ namespace simple_olap
 
         explicit Expr(Type type) : type(type) {}
         virtual ~Expr() = default; // 多态基类必须有虚析构函数
+
+        /// @brief 调试接口：将表达式还原为可读字符串
+        virtual std::string ToString() const = 0;
     };
 
     /// @brief 列引用 (如: SELECT a 中的 'a', GROUP BY a 中的 'a')
@@ -58,6 +50,8 @@ namespace simple_olap
 
         explicit ColumnRefExpr(std::string name)
             : Expr(Type::COLUMN_REF), column_name(std::move(name)) {}
+
+        std::string ToString() const override { return column_name; }
     };
 
     /// @brief 字面量 (如: WHERE a > 18 中的 '18')
@@ -68,6 +62,15 @@ namespace simple_olap
         explicit LiteralExpr(int32_t v) : Expr(Type::LITERAL), value(v) {}
         explicit LiteralExpr(double v) : Expr(Type::LITERAL), value(v) {}
         explicit LiteralExpr(std::string v) : Expr(Type::LITERAL), value(std::move(v)) {}
+
+        std::string ToString() const override
+        {
+            if (std::holds_alternative<int32_t>(value))
+                return std::to_string(std::get<int32_t>(value));
+            if (std::holds_alternative<double>(value))
+                return std::to_string(std::get<double>(value));
+            return "'" + std::get<std::string>(value) + "'";
+        }
     };
 
     /// @brief 二元操作 (支持算术、比较、逻辑 AND/OR)
@@ -90,6 +93,13 @@ namespace simple_olap
 
         BinaryOpExpr(OpType op, ExprPtr left, ExprPtr right)
             : Expr(Type::BINARY_OP), op(op), left(std::move(left)), right(std::move(right)) {}
+
+        std::string ToString() const override
+        {
+            static const char *op_names[] = {"+", "-", "=", ">", "<", "AND", "OR"};
+            return "(" + left->ToString() + " " + op_names[static_cast<int>(op)] +
+                   " " + right->ToString() + ")";
+        }
     };
 
     /// @brief 聚合函数
@@ -100,6 +110,13 @@ namespace simple_olap
 
         AggFuncExpr(AggType agg_type, ExprPtr arg)
             : Expr(Type::AGG_FUNC), agg_type(agg_type), arg(std::move(arg)) {}
+
+        std::string ToString() const override
+        {
+            static const char *agg_names[] = {"INVALID", "SUM", "COUNT", "AVG", "MIN", "MAX"};
+            std::string inner = arg ? arg->ToString() : "*";
+            return std::string(agg_names[static_cast<int>(agg_type)]) + "(" + inner + ")";
+        }
     };
 
 } // namespace simple_olap

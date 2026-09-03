@@ -1,3 +1,9 @@
+#pragma once
+
+#include <string>
+#include <vector>
+#include <cstdint>
+
 #include "boundexpr.h"
 
 namespace simple_olap
@@ -100,9 +106,31 @@ namespace simple_olap
     public:
         BoundInsertStatement() : BoundStatement(Type::INSERT) {}
         uint32_t table_oid;
+        // 目标列的物理索引（INSERT 未指定列名时为全列顺序 0..n-1）
+        std::vector<uint32_t> target_col_indices;
         std::vector<std::vector<std::unique_ptr<BoundExpr>>> values;
 
         std::string ToString() const override { return "BoundInsertStatement(...)"; }
+        void Accept(BoundStatementVisitor *visitor) const override;
+    };
+
+    /// @brief 绑定后的列定义 (CREATE TABLE 用)
+    struct BoundColumnDef
+    {
+        std::string name;
+        DataType type;
+    };
+
+    /// @brief 绑定后的 CREATE TABLE 语句
+    class BoundCreateTableStatement : public BoundStatement
+    {
+    public:
+        BoundCreateTableStatement() : BoundStatement(Type::CREATE_TABLE) {}
+        std::string table_name;
+        std::vector<BoundColumnDef> columns;
+
+        std::string ToString() const override { 
+            return "BoundCreateTableStatement(...)"; }
         void Accept(BoundStatementVisitor *visitor) const override;
     };
 } // namespace simple_olap

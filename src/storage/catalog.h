@@ -4,7 +4,7 @@
 #include <optional>
 #include <string_view>
 #include "datastructs.h"
-#include "test_statement.h"
+#include "../sql/ast/statement.h" // CreateTableStatement 正式定义（替代临时的 test_statement.h）
 #include "table/table.h"
 
 namespace simple_olap

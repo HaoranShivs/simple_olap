@@ -1,9 +1,16 @@
 #include "binder.h"
 
 #include <stdexcept>
+#include <unordered_set>
 
 namespace simple_olap
 {
+    // 类型兼容性检查：INSERT 值类型与目标列类型是否匹配
+    // 简化策略：完全相同才兼容；数值类型间暂不做隐式转换（后续可扩展 Cast）
+    static bool IsTypeCompatible(DataType expected, DataType actual)
+    {
+        return expected == actual;
+    }
 
     // ==================== BinderContext ====================
 
@@ -39,8 +46,160 @@ namespace simple_olap
 
     // ==================== Binder ====================
 
+    BoundStatementPtr Binder::BindCreateTable(const CreateTableStatement &stmt)
+    {
+        // 1. 检查表是否已存在（Catalog::FindTable 仅查元数据，未找到返回空 optional）
+        if (catalog_.FindTable(stmt.table_name).has_value())
+        {
+            throw SemanticException("Table already exists: " + stmt.table_name);
+        }
+
+        // 2. 校验列定义
+        std::unordered_set<std::string> seen_cols;
+        std::vector<BoundColumnDef> bound_cols;
+        bound_cols.reserve(stmt.columns.size());
+
+        for (const auto &col : stmt.columns)
+        {
+            // 校验空列名
+            if (col.name.empty())
+            {
+                throw SemanticException("Column name cannot be empty");
+            }
+            // 校验列名重复
+            if (seen_cols.count(col.name))
+            {
+                throw SemanticException("Duplicate column name: " + col.name);
+            }
+            seen_cols.insert(col.name);
+
+            // 校验数据类型
+            if (col.type == DataType::INVALID)
+            {
+                throw SemanticException("Invalid data type for column: " + col.name);
+            }
+
+            bound_cols.push_back({col.name, col.type});
+        }
+
+        // 3. 组装返回
+        auto result = std::make_unique<BoundCreateTableStatement>();
+        result->table_name = stmt.table_name;
+        result->columns = std::move(bound_cols);
+        return result;
+    }
+
+    BoundStatementPtr Binder::BindInsert(const InsertStatement &stmt)
+    {
+        // 1. 查表，获取 Table（GetTable 不存在返回 nullptr，存在但未载入会自动 Load）
+        Table *table = catalog_.GetTable(stmt.table_name);
+        if (table == nullptr)
+        {
+            throw SemanticException("Table not found: " + stmt.table_name);
+        }
+        const TableSchema &schema = table->GetSchema();
+
+        // 2. 确定目标列及其物理索引
+        std::vector<uint32_t> target_indices;
+
+        if (stmt.columns.empty())
+        {
+            // 情况 A: 未指定列名，默认插入所有列
+            // 校验第一行的值数量是否匹配全表列数
+            if (!stmt.values.empty() && stmt.values[0].size() != schema.columns.size())
+            {
+                throw SemanticException("INSERT VALUES size mismatch with table schema");
+            }
+            for (uint32_t i = 0; i < schema.columns.size(); ++i)
+            {
+                target_indices.push_back(i);
+            }
+        }
+        else
+        {
+            // 情况 B: 指定了列名，需要建立 逻辑列名 -> 物理索引 的映射
+            if (!stmt.values.empty() && stmt.values[0].size() != stmt.columns.size())
+            {
+                throw SemanticException("INSERT VALUES size mismatch with specified columns");
+            }
+
+            std::unordered_set<std::string> seen;
+            for (const auto &col_name : stmt.columns)
+            {
+                if (seen.count(col_name))
+                {
+                    throw SemanticException("Duplicate column in INSERT: " + col_name);
+                }
+                seen.insert(col_name);
+
+                // 在 Schema 中查找该列的物理索引（ColumnSchema 无 idx 字段，用遍历下标）
+                bool found = false;
+                for (size_t j = 0; j < schema.columns.size(); ++j)
+                {
+                    if (schema.columns[j].name == col_name)
+                    {
+                        target_indices.push_back(static_cast<uint32_t>(
+
+j));
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                {
+                    throw SemanticException("Column not found in table: " + col_name);
+                }
+            }
+        }
+
+        // 3. 绑定 VALUES 并做类型检查
+        std::vector<std::vector<std::unique_ptr<BoundExpr>>> bound_values;
+        bound_values.reserve(stmt.values.size());
+
+        for (const auto &row : stmt.values)
+        {
+            if (row.size() != target_indices.size())
+            {
+                throw SemanticException("INSERT row values size mismatch");
+            }
+
+            std::vector<std::unique_ptr<BoundExpr>> bound_row;
+            bound_row.reserve(row.size());
+
+            for (size_t i = 0; i < row.size(); ++i)
+            {
+                // 绑定表达式 (通常是字面量，也可能是简单的算术表达式)
+                auto bound_expr = BindExpr(*row[i]);
+
+                // 类型校验
+                uint32_t physical_col_idx = target_indices[i];
+                DataType expected_type = schema.columns[physical_col_idx].type;
+                DataType actual_type = bound_expr->return_type;
+
+                if (!IsTypeCompatible(expected_type, actual_type))
+                {
+                    throw SemanticException("Type mismatch in INSERT for column index " +
+                                            std::to_string(physical_col_idx));
+                }
+
+                // 简化版暂不实现隐式类型转换 (Cast)
+                // 若需要，可在此处插入: bound_expr = AddCastIfNeeded(std::move(bound_expr), expected_type);
+
+                bound_row.push_back(std::move(bound_expr));
+            }
+            bound_values.push_back(std::move(bound_row));
+        }
+
+        // 4. 组装返回（table_oid 从 FindTable 获取，TableSchema 本身不含 oid）
+        auto result = std::make_unique<BoundInsertStatement>();
+        result->table_oid = catalog_.FindTable(stmt.table_name).value();
+        result->target_col_indices = std::move(target_indices);
+        result->values = std::move(bound_values);
+        return result;
+    }
+
     // 1. 总入口
-    std::unique_ptr<BoundSelectStatement> Binder::BindSelect(const SelectStatement &stmt)
+    BoundStatementPtr Binder::BindSelect(const SelectStatement &stmt)
     {
         context_ = std::make_unique<BinderContext>();
 

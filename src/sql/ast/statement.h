@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "../../storage/datastructs.h"
 #include "expression.h"
 
 namespace simple_olap
@@ -152,36 +153,29 @@ namespace simple_olap
         // std::vector<std::string> partition_keys;
 
         // 4. 实现基类的纯虚函数
-        std::string ToString() const override
-        {
-            std::string sql = "CREATE TABLE ";
-            if (if_not_exists)
-                sql += "IF NOT EXISTS ";
-            sql += table_name + " (\n";
-
-            for (size_t i = 0; i < columns.size(); ++i)
+            std::string ToString() const override
             {
-                sql += "  " + columns[i].ToString();
-                if (i < columns.size() - 1)
-                    sql += ",\n";
-            }
-            sql += "\n)";
-
-            // 打印 OLAP 特性
-            if (!sort_keys.empty())
-            {
-                sql += " ORDER BY (";
-                for (size_t i = 0; i < sort_keys.size(); ++i)
+                std::string sql = "CREATE TABLE ";
+                if (if_not_exists)
+                    sql += "IF NOT EXISTS ";
+                sql += table_name + " (\n";
+    
+                static const char *type_names[] = {"INVALID", "INT32", "INT64", "FLOAT", "DOUBLE", "VARCHAR"};
+                for (size_t i = 0; i < columns.size(); ++i)
                 {
-                    sql += sort_keys[i];
-                    if (i < sort_keys.size() - 1)
-                        sql += ", ";
+                    const auto &col = columns[i];
+                    sql += "  " + col.name + " ";
+                    auto t = static_cast<int>(col.type);
+                    sql += (t >= 0 && t < 6) ? type_names[t] : "UNKNOWN";
+                    if (i < columns.size() - 1)
+                        sql += ",\n";
                 }
-                sql += ")";
+                sql += "\n)";
+    
+                // 排序键 (sort_keys) 暂不支持，待启用成员后在此打印
+    
+                return sql;
             }
-
-            return sql;
-        }
 
         void Accept(StatementVisitor *visitor) const override
         {

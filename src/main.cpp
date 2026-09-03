@@ -22,55 +22,59 @@ namespace
         CreateTableStatement stmt;
         stmt.table_name = kTableName;
         stmt.columns = {
-            {"user_id", DataType::INT32},
-            {"age", DataType::INT64},
-            {"score", DataType::DOUBLE},
+            {0, "user_id", DataType::INT32},
+            {1, "age", DataType::INT64},
+            {2, "score", DataType::DOUBLE},
         };
         return stmt;
     }
 
     // 按表 schema 生成一条 INSERT 指令：nrows 行随机数据
+    // （正式 AST 的 InsertStatement.values 是 ExprPtr，此处用 LiteralExpr 承载随机值）
     InsertStatement MakeInsert(const TableSchema &schema, size_t nrows, std::mt19937 &rng)
     {
         InsertStatement stmt;
         stmt.table_name = kTableName;
-        stmt.rows.reserve(nrows);
+        stmt.values.reserve(nrows);
 
         std::uniform_int_distribution<int32_t> user_dist(0, 1000000);
-        std::uniform_int_distribution<int64_t> age_dist(18, 80);
+        std::uniform_int_distribution<int32_t> 
+        age_dist(18, 80);
         std::uniform_real_distribution<double> score_dist(0.0, 100.0);
 
         for (size_t r = 0; r < nrows; ++r)
         {
-            std::vector<LiteralValue> row;
+            std::vector<ExprPtr> row;
             row.reserve(schema.columns.size());
-            for (const auto &col : schema.columns)
+            for (const auto & 
+            col : schema.columns)
             {
                 switch (col.type)
                 {
                 case DataType::INT32:
-                    row.emplace_back(user_dist(rng));
+                    row.push_back(std::make_unique<LiteralExpr>(user_dist(rng)));
                     break;
                 case DataType::INT64:
-                    row.emplace_back(age_dist(rng));
+                    // LiteralExpr 暂只支持 int32_t，INT64 值先以 int32 承载
+                    row.push_back(std::make_unique<LiteralExpr>(age_dist(rng)));
                     break;
                 case DataType::DOUBLE:
-                    row.emplace_back(score_dist(rng));
+                    row.push_back(std::make_unique<LiteralExpr>(score_dist(rng)));
                     break;
                 default:
-                    row.emplace_back(std::string("n/a"));
+                    row.push_back(std::make_unique<LiteralExpr>(std::string("n/a")));
                     break;
                 }
             }
-            stmt.rows.push_back(std::move(row));
+            stmt.values.push_back(std::move(row));
         }
         return stmt;
     }
 
-    // 把 InsertStatement（按列名顺序的 LiteralValue 行）转成表存储需要的 DataChunk
+    // 把 InsertStatement（按列顺序的 LiteralExpr 行）转成表存储需要的 DataChunk
     DataChunk ToDataChunk(const InsertStatement &stmt, const TableSchema &schema)
     {
-        const size_t nrows = stmt.rows.size();
+        const size_t nrows = stmt.values.size();
         const size_t ncols = schema.columns.size();
 
         DataChunk chunk(nrows); // capacity 即行数
@@ -83,26 +87,29 @@ namespace
 
             for (size_t r = 0; r < nrows; ++r)
             {
-                const LiteralValue &v = stmt.rows[r][c];
+                const auto &expr = stmt.values[r][c];
+                const auto &literal = static_cast<const LiteralExpr &>(*expr);
                 uint8_t *dst = buf.get() + r * elem_size;
                 switch (type)
                 {
                 case DataType::INT32:
                 {
-                    const int32_t x = std::get<int32_t>(v);
+                    const int32_t x = std::get<int32_t>(literal.value);
                     std::memcpy(dst, &x, sizeof(x));
                     break;
                 }
                 case DataType::INT64:
                 {
-                    const int64_t x = std::get<int64_t>(v);
+                    // LiteralExpr 暂只支持 int32_t，写入时扩展为 int64
+                    const int64_t x = std::get<int32_t>(literal.value);
                     std::memcpy(dst, &x, sizeof(x));
                     break;
                 }
                 case DataType::DOUBLE:
                 {
-                    const double x = std::get<double>(v);
-                    std::memcpy(dst, &x, sizeof(x));
+                    const double x = std::get<double>(literal.value);
+                    std::memcpy(dst, 
+                    &x, sizeof(x));
                     break;
                 }
                 default:
@@ -115,16 +122,18 @@ namespace
     }
 
     // 测试 scan：跑完整个 pull 循环，输出每批的行数与列数
-    void RunScan(Catalog &catalog, const std::string &label, Expression *where)
+    // where 条件用正式 AST 的 BinaryOpExpr(column > literal) 表示
+    void RunScan(Catalog &catalog, const std::string &label, ExprPtr where)
     {
         SelectStatement select;
         select.table_name = kTableName;
-        select.select_list = {
-            {"user_id", AggType::INVALID},
-            {"age", AggType::INVALID},
-            {"score", AggType::INVALID},
-        };
-        select.where = where;
+        select.select_list.emplace_back(
+            std::make_unique<ColumnRefExpr>("user_id"));
+        select.select_list.emplace_back(
+            std::make_unique<ColumnRefExpr>("age"));
+        select.select_list.emplace_back(
+            std::make_unique<ColumnRefExpr>("score"));
+        select.where_clause = std::move(where);
         select.group_by = {};
 
         TableScan scan(select, &catalog);
@@ -137,10 +146,12 @@ namespace
         {
             ++total_batches;
             // 有 where 时数据未压缩，有效行由 sel_vector 标记；无 where 时即 batch.size
-            const uint64_t valid_rows =
-                where ? static_cast<uint64_t>(batch.sel_vector.size()) : batch.size;
+            const uint64_t 
+            valid_rows =
+                select.where_clause ? static_cast<uint64_t>(batch.sel_vector.size()) : batch.size;
             total_rows += valid_rows;
-            std::cout << "  batch #" << total_batches
+            std::cout << "  batch #" << 
+            total_batches
                       << ": rows=" << valid_rows
                       << ", cols=" << batch.ColumnCount() << "\n";
         }
@@ -220,11 +231,11 @@ int main()
 
     // 2. 带 where 的扫描：user_id > 500000，
     //    同时验证行级过滤（sel_vector）与跨 segment 游标推进
-    Expression cond;
-    cond.column_name = "user_id";
-    cond.op = CmpOp::GT;
-    cond.value = 500000;
-    RunScan(catalog, "scan where user_id > 500000", &cond);
+    ExprPtr cond = std::make_unique<BinaryOpExpr>(
+        BinaryOpExpr::OpType::GT,
+        std::make_unique<ColumnRefExpr>("user_id"),
+        std::make_unique<LiteralExpr>(500000));
+    RunScan(catalog, "scan where user_id > 500000", std::move(cond));
 
     return 0;
 }
