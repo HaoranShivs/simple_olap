@@ -95,7 +95,11 @@ namespace simple_olap
             return "BoundSelectStatement(...)"; // 具体实现省略
         }
 
-        void Accept(BoundStatementVisitor *visitor) const override;
+        void Accept(BoundStatementVisitor *visitor) const override
+        {
+            // Visitor 模式待实现，先提供空定义以满足链接
+            (void)visitor;
+        }
     };
 
     // ==========================================
@@ -111,7 +115,11 @@ namespace simple_olap
         std::vector<std::vector<std::unique_ptr<BoundExpr>>> values;
 
         std::string ToString() const override { return "BoundInsertStatement(...)"; }
-        void Accept(BoundStatementVisitor *visitor) const override;
+        void Accept(BoundStatementVisitor *visitor) const override
+        {
+            // Visitor 模式待实现，先提供空定义以满足链接
+            (void)visitor;
+        }
     };
 
     /// @brief 绑定后的列定义 (CREATE TABLE 用)
@@ -131,6 +139,10 @@ namespace simple_olap
 
         std::string ToString() const override { 
             return "BoundCreateTableStatement(...)"; }
-        void Accept(BoundStatementVisitor *visitor) const override;
+        void Accept(BoundStatementVisitor *visitor) const override
+        {
+            // Visitor 模式待实现，先提供空定义以满足链接
+            (void)visitor;
+        }
     };
 } // namespace simple_olap

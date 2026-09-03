@@ -87,6 +87,12 @@ namespace simple_olap
         return true;
     }
 
+    // 返回内存元数据的引用（只读用途：表名列表、表 id 查询等）
+    CatalogMeta &Catalog::GetCatalogMeta()
+    {
+        return metadata_;
+    }
+
     bool Catalog::SaveMeta(const std::filesystem::path &path) const
     {
         // 1. 序列化元数据

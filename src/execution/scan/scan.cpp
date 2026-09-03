@@ -79,10 +79,24 @@ namespace simple_olap
             const auto &col = static_cast<const ColumnRefExpr &>(*bin.left);
             const auto &lit = static_cast<const LiteralExpr &>(*bin.right);
 
+            // 词法层把所有数字都 lex 成 FLOAT token，整数字面量也是 double，
+            // 这里统一转回 int32（ExprTarget 暂只支持 int32 常量）
+            if (!std::holds_alternative<double>(lit.value))
+            {
+                throw std::runtime_error(
+                    "TableScan::Init - WHERE literal must be numeric");
+            }
+            const double raw = std::get<double>(lit.value);
+            if (raw != static_cast<int32_t>(raw))
+            {
+                throw std::runtime_error(
+                    "TableScan::Init - WHERE literal must be an integer");
+            }
+
             auto expr = std::make_unique<ExprTarget>();
             expr->column_id = FindColumnId(schema, col.column_name);
             expr->op = ToCmpOp(bin.op);
-            expr->value = std::get<int32_t>(lit.value);
+            expr->value = static_cast<int32_t>(raw);
             request_.where = std::move(expr);
         }
 

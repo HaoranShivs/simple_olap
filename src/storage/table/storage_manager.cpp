@@ -119,6 +119,21 @@ namespace simple_olap
         sealed_segments_[active_segment_id_] = std::move(active_segment_);
     }
 
+    StorageManager::~StorageManager()
+    {
+        // 析构兜底：把非空的活跃 segment 封存并落盘，防止进程退出丢数据。
+        // 注意：这里只负责数据落盘，TableMeta 的持久化（table.meta）由上层 Table 负责。
+        if (active_segment_ != nullptr && active_segment_->row_count() > 0)
+        {
+            SealActiveSegment();
+            CreateActiveSegment();
+        }
+        if (!sealed_segments_.empty())
+        {
+            Flush();
+        }
+    }
+
     void StorageManager::Flush()
     {
         // 将内存中所有待刷盘 segment 写盘，并把 id 直接登记进 TableMeta。

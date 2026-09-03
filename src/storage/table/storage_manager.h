@@ -30,6 +30,17 @@ namespace simple_olap
 
         void Flush();
 
+        // 析构时把非空的活跃 segment 封存并落盘，防止进程退出丢数据
+        ~StorageManager();
+
+        // ---------- 临时观察接口（调试/REPL 用，后续可能移除） ----------
+
+        // 活跃 segment 当前已积累的行数（未封存、scan 不可见）
+        uint32_t active_segment_row_count() const noexcept
+        {
+            return active_segment_ ? active_segment_->row_count() : 0;
+        }
+
         // segment 总数（已落盘 + 内存中待刷盘）
         size_t segment_count() const noexcept
         {

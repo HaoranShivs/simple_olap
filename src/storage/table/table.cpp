@@ -88,6 +88,11 @@ namespace simple_olap
         return true;
     }
 
+    uint32_t Table::active_segment_row_count() const noexcept
+    {
+        return storage_->active_segment_row_count();
+    }
+
     bool Table::Flush()
     {
         // 1. 写回数据：将内存中待刷盘的 segment 写盘
