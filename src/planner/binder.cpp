@@ -140,7 +140,7 @@ namespace simple_olap
                     {
                         target_indices.push_back(static_cast<uint32_t>(
 
-j));
+                            j));
                         found = true;
                         break;
                     }
@@ -233,8 +233,7 @@ j));
         case Expr::Type::BINARY_OP:
             return BindBinaryOp(static_cast<const BinaryOpExpr &>(expr));
         case Expr::Type::AGG_FUNC:
-            // TODO: 聚合函数绑定
-            throw SemanticException("Aggregate function binding not implemented yet.");
+            return BindAggFunc(static_cast<const AggFuncExpr &>(expr));
         }
         throw SemanticException("Unknown expression type.");
     }
@@ -272,10 +271,27 @@ j));
         auto left = BindExpr(*expr.left);
         auto right = BindExpr(*expr.right);
 
-        // 类型推导：任一侧为 DOUBLE 则结果为 DOUBLE，否则沿用左侧类型
-        DataType dtype = (left->return_type == DataType::DOUBLE || right->return_type == DataType::DOUBLE)
-                             ? DataType::DOUBLE
-                             : left->return_type;
+        // 类型推导：
+        //   - 比较与逻辑运算（EQ/GT/LT/AND/OR）结果为布尔语义，统一用 INT32 表示
+        //   - 算术运算（ADD/SUB）任一侧为 DOUBLE 则结果为 DOUBLE，否则沿用左侧类型
+        DataType dtype;
+        switch (expr.op)
+        {
+        case BinaryOpExpr::OpType::EQ:
+        case BinaryOpExpr::OpType::GT:
+        case BinaryOpExpr::OpType::LT:
+        case BinaryOpExpr::OpType::AND:
+        case BinaryOpExpr::OpType::OR:
+            dtype = DataType::INT32;
+            break;
+        case BinaryOpExpr::OpType::ADD:
+        case BinaryOpExpr::OpType::SUB:
+        default:
+            dtype = (left->return_type == DataType::DOUBLE || right->return_type == DataType::DOUBLE)
+                        ? DataType::DOUBLE
+                        : left->return_type;
+            break;
+        }
 
         return std::make_unique<BoundBinaryOp>(expr.op, std::move(left), std::move(right), dtype);
     }
@@ -287,7 +303,7 @@ j));
         bool has_group_by = !group_by.empty();
         for (const auto &item : select_list)
         {
-            if (!IsAggregate(*item.expr) && has_group_by)
+            if (!ContainsAggregate(*item.expr) && has_group_by)
             {
                 if (!IsInGroupBy(*item.expr, group_by))
                 {
@@ -295,12 +311,6 @@ j));
                 }
             }
         }
-    }
-
-    // 5. 聚合判断辅助函数
-    bool Binder::IsAggregate(const BoundExpr &expr)
-    {
-        return expr.type == BoundExpr::Type::AGG_FUNC;
     }
 
     bool Binder::IsInGroupBy(const BoundExpr &expr, const std::vector<std::unique_ptr<BoundExpr>> &group_by)
@@ -312,6 +322,69 @@ j));
             {
                 return true;
             }
+        }
+        return false;
+    }
+
+    static bool IsNumeric(DataType type)
+    {
+        return type == DataType::INT32 || type == DataType::INT64 ||
+               type == DataType::FLOAT || type == DataType::DOUBLE;
+    }
+
+    std::unique_ptr<BoundExpr> Binder::BindAggFunc(const AggFuncExpr &expr)
+    {
+        if (!expr.arg)
+        {
+            if (expr.agg_type != AggType::COUNT)
+            {
+                throw SemanticException("Only COUNT(*) may omit aggregate argument");
+            }
+            return std::make_unique<BoundAggFunc>(
+                AggType::COUNT, nullptr, DataType::INT64);
+        }
+
+        auto arg = BindExpr(*expr.arg);
+        if (ContainsAggregate(*arg))
+        {
+            throw SemanticException("Nested aggregate functions are not supported");
+        }
+
+        switch (expr.agg_type)
+        {
+        case AggType::COUNT:
+            return std::make_unique<BoundAggFunc>(
+                expr.agg_type, std::move(arg), DataType::INT64);
+        case AggType::AVG:
+            if (!IsNumeric(arg->return_type))
+                throw SemanticException("AVG requires numeric input");
+            return std::make_unique<BoundAggFunc>(
+                expr.agg_type, std::move(arg), DataType::DOUBLE);
+        case AggType::SUM:
+            if (!IsNumeric(arg->return_type))
+                throw SemanticException("SUM requires numeric input");
+            return std::make_unique<BoundAggFunc>(
+                expr.agg_type, std::move(arg), DataType::DOUBLE);
+        case AggType::MIN:
+        case AggType::MAX:
+        {
+            const DataType result_type = arg->return_type;
+            return std::make_unique<BoundAggFunc>(
+                expr.agg_type, std::move(arg), result_type);
+        }
+        default:
+            throw SemanticException("Unsupported aggregate function");
+        }
+    }
+
+    bool Binder::ContainsAggregate(const BoundExpr &expr) const
+    {
+        if (expr.type == BoundExpr::Type::AGG_FUNC)
+            return true;
+        if (expr.type == BoundExpr::Type::BINARY_OP)
+        {
+            const auto &binary = static_cast<const BoundBinaryOp &>(expr);
+            return ContainsAggregate(*binary.left) || ContainsAggregate(*binary.right);
         }
         return false;
     }

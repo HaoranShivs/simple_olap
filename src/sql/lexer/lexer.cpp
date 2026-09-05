@@ -4,8 +4,11 @@
 
 namespace simple_olap
 {
-
-    Lexer::Lexer(std::string_view sql) : sql_(sql) {}
+    std::vector<Token> Lexer::Lex(std::string_view sql){
+        sql_ = sql;
+        curridx_ = 0;
+        return Tokenize();
+    }
 
     Token Lexer::NextToken()
     {

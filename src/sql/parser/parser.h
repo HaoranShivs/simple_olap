@@ -15,11 +15,11 @@ namespace simple_olap
     class Parser
     {
     public:
-        explicit Parser(std::vector<Token> tokens);
-
+        explicit Parser();
+        
         /// @brief 解析总入口。根据当前 Token 的类型（如 SELECT, INSERT）进行分发（Dispatch），
         /// 调用具体的解析函数，并返回代表抽象语法树（AST）根节点的智能指针。
-        StatementPtr ParseStatement();
+        StatementPtr ParseStatement(std::vector<Token> tokens);
 
     private:
         // ---------- 语句级解析 ----------
@@ -74,6 +74,7 @@ namespace simple_olap
 
         std::vector<Token> tokens_;
         uint32_t current_index_ = 0;
+        Lexer lexer_;
     };
 
 } // namespace simple_olap

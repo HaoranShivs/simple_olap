@@ -83,12 +83,11 @@ namespace simple_olap
 
         std::unique_ptr<BoundExpr> BindBinaryOp(const BinaryOpExpr &expr);
 
+        std::unique_ptr<BoundExpr> BindAggFunc(const AggFuncExpr &expr);
+
         // 4. 聚合合法性校验 (OLAP 必须)
         void ValidateAggregations(const std::vector<BoundSelectItem> &select_list,
                                   const std::vector<std::unique_ptr<BoundExpr>> &group_by);
-
-        // 5. 聚合判断辅助函数
-        bool IsAggregate(const BoundExpr &expr);
 
         bool IsInGroupBy(const BoundExpr &expr, const std::vector<std::unique_ptr<BoundExpr>> &group_by);
 
@@ -97,6 +96,8 @@ namespace simple_olap
         std::vector<BoundSelectItem> BindSelectList(const std::vector<SelectItem> &select_list);
 
         std::vector<BndExprPtr> BindGroupBy(const std::vector<ExprPtr> &group_by);
+
+        bool ContainsAggregate(const BoundExpr &expr) const;
 
         Catalog &catalog_;
         std::unique_ptr<BinderContext> context_;

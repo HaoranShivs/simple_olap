@@ -10,11 +10,11 @@ namespace simple_olap
     // 构造与入口
     // ============================================================
 
-    Parser::Parser(std::vector<Token> tokens)
-        : tokens_(std::move(tokens)), current_index_(0) {}
-
-    StatementPtr Parser::ParseStatement()
+    StatementPtr Parser::ParseStatement(std::vector<Token> tokens)
     {
+        tokens_ = tokens;
+        current_index_ = 0;
+
         if (Match(TokenType::SELECT))
         {
             return ParseSelect();
@@ -282,8 +282,6 @@ namespace simple_olap
             if (Peek().type == TokenType::LPAREN)
             {
                 Consume(); // '('
-                ExprPtr arg = ParseExpression();
-                Expect(TokenType::RPAREN, "Expected ')' after function argument");
 
                 AggType agg_type = AggType::INVALID;
                 if (name == "SUM")
@@ -301,6 +299,29 @@ namespace simple_olap
                 {
                     throw std::runtime_error("Unknown function: " + name);
                 }
+
+                // ExprPtr arg = ParseExpression();
+                ExprPtr arg = nullptr;
+                if (Match(TokenType::STAR))
+                {
+                    // mini_olap 中只有 COUNT 支持 '*'
+                    if (agg_type != AggType::COUNT)
+                    {
+                        throw std::runtime_error(
+                            "Only COUNT(*) supports '*' as aggregate argument");
+                    }
+                }
+                else
+                {
+                    // 禁止 COUNT() / SUM() 这种空参数
+                    if (Peek().type == TokenType::RPAREN)
+                    {
+                        throw std::runtime_error(
+                            "Aggregate function requires an argument: " + name);
+                    }
+                    arg = ParseExpression();
+                }
+                Expect(TokenType::RPAREN, "Expected ')' after function argument");
                 return std::make_unique<AggFuncExpr>(agg_type, std::move(arg));
             }
             return std::make_unique<ColumnRefExpr>(std::move(name));

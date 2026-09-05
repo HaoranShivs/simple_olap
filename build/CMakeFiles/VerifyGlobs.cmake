@@ -4,11 +4,18 @@
 # PROJECT_SOURCES at CMakeLists.txt:26 (file)
 file(GLOB_RECURSE NEW_GLOB LIST_DIRECTORIES false "/home/orangepi3/Projects/simple_olap/src/*.cpp")
 set(OLD_GLOB
+  "/home/orangepi3/Projects/simple_olap/src/database.cpp"
   "/home/orangepi3/Projects/simple_olap/src/execution/aggregate/aggregate.cpp"
   "/home/orangepi3/Projects/simple_olap/src/execution/scan/scan.cpp"
   "/home/orangepi3/Projects/simple_olap/src/execution/vector/vector.cpp"
   "/home/orangepi3/Projects/simple_olap/src/main.cpp"
   "/home/orangepi3/Projects/simple_olap/src/planner/binder.cpp"
+  "/home/orangepi3/Projects/simple_olap/src/planner/logical_plan/logical_plan.cpp"
+  "/home/orangepi3/Projects/simple_olap/src/planner/optimizer/optimizer.cpp"
+  "/home/orangepi3/Projects/simple_olap/src/planner/physical_plan/physical_plan.cpp"
+  "/home/orangepi3/Projects/simple_olap/src/planner/physical_plan/physical_planner.cpp"
+  "/home/orangepi3/Projects/simple_olap/src/planner/plan_expression.cpp"
+  "/home/orangepi3/Projects/simple_olap/src/planner/planner.cpp"
   "/home/orangepi3/Projects/simple_olap/src/sql/ast/boundexpr.cpp"
   "/home/orangepi3/Projects/simple_olap/src/sql/ast/statement.cpp"
   "/home/orangepi3/Projects/simple_olap/src/sql/lexer/lexer.cpp"
