@@ -1,33 +1,24 @@
-namespace simple_olap
-{
-    struct FilterPredicate
-    {
-        uint32_t input_col_idx; // 不是ColumnId
-        CmpOp op;
+#pragma once
 
-        LiteralValue value;
+#include <memory>
 
-        class FilterOperator : public Operator
-        {
-        public:
-            FilterOperator(
-                std::unique_ptr<Operator> child,
-                FilterPredicate predicate)
-                : child_(std::move(child)),
-                  predicate_(std::move(predicate))
-            {
-            }
+#include "../expression/exec_expression.h"
+#include "../operator.h"
 
-            void Init() override
-            {
-                child_->Init();
-            }
+namespace simple_olap {
 
-            bool Next(VectorBatch &output) override;
+class FilterOperator final : public Operator {
+public:
+    FilterOperator(std::unique_ptr<Operator> child, ExecExprPtr predicate)
+        : child_(std::move(child)), predicate_(std::move(predicate)) {}
 
-        private:
-            std::unique_ptr<Operator> child_;
-            FilterPredicate predicate_;
-        };
-    };
+    void Init() override;
+    bool Next(VectorBatch &batch) override;
+
+private:
+    std::unique_ptr<Operator> child_;
+    ExecExprPtr predicate_;
+    std::vector<uint32_t> selection_;
+};
+
 } // namespace simple_olap

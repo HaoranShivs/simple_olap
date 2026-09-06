@@ -1,45 +1,42 @@
-namespace simple_olap
-{
-    bool FilterOperator::Next(VectorBatch &output)
-    {
-        while (child_->Next(output))
-        {
-            const auto &column =
-                output.columns[predicate_.input_col_idx];
+#include "filter.h"
 
-            std::vector<uint32_t> new_selection;
+#include "../batch_utils.h"
 
-            new_selection.reserve(output.size);
+namespace simple_olap {
 
-            for (uint32_t i = 0;
-                 i < output.size;
-                 ++i)
-            {
-                uint32_t row =
-                    output.sel_vector[i];
+void FilterOperator::Init() {
+    child_->Init();
+    selection_.clear();
+    selection_.reserve(VectorBatch::BATCH_SIZE);
+}
 
-                if (EvaluatePredicate(
-                        column,
-                        row,
-                        predicate_))
-                {
-                    new_selection.push_back(row);
-                }
-            }
+bool FilterOperator::Next(VectorBatch &batch) {
+    while (child_->Next(batch)) {
+        const uint32_t active = ActiveRowCount(batch);
+        selection_.clear();
 
-            output.sel_vector =
-                std::move(new_selection);
-
-            output.size =
-                static_cast<uint32_t>(
-                    output.sel_vector.size());
-
-            if (output.size > 0)
-            {
-                return true;
+        for (uint32_t i = 0; i < active; ++i) {
+            const uint32_t row = ActiveRowIndex(batch, i);
+            if (ExecValueAsBool(predicate_->Eval(batch, row))) {
+                selection_.push_back(row);
             }
         }
 
-        return false;
+        if (selection_.empty()) {
+            continue;
+        }
+
+        const uint32_t physical_count = PhysicalRowCount(batch);
+        batch.size = static_cast<uint32_t>(selection_.size());
+        if (IsIdentitySelection(selection_, physical_count)) {
+            batch.sel_vector.clear();
+        } else {
+            batch.sel_vector = selection_;
+        }
+        return true;
     }
+
+    return false;
+}
+
 } // namespace simple_olap

@@ -3,9 +3,9 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace simple_olap{
+namespace simple_olap {
 
-enum class DataType: uint8_t{
+enum class DataType : uint8_t {
     INVALID = 0,
     INT32,
     INT64,
@@ -15,9 +15,12 @@ enum class DataType: uint8_t{
 };
 
 // 比较运算符：公共定义，供存储层 Condition 与 SQL 层共用
-enum class CmpOp : uint8_t {
-    EQ, NE, GT, GE, LT, LE
-};
+enum class CmpOp : uint8_t { EQ, NE, GT, GE, LT, LE };
+
+// 公共 ID 类型别名：供存储层、执行层、计划层共用
+using TableId = uint32_t;
+using ColumnId = uint32_t;
+using SegmentId = uint32_t;
 
 // 聚合函数类型：公共定义，供 SQL AST 与执行层共用
 enum class AggType : uint8_t {
@@ -30,10 +33,8 @@ enum class AggType : uint8_t {
 };
 
 // 获取类型对应的元素大小（字节）
-inline size_t TypeElemSize(DataType t)
-{
-    switch (t)
-    {
+inline size_t TypeElemSize(DataType t) {
+    switch (t) {
     case DataType::INT32:
         return sizeof(int32_t);
     case DataType::INT64:
@@ -47,4 +48,4 @@ inline size_t TypeElemSize(DataType t)
     }
 }
 
-}   // namespace simple_olap
+} // namespace simple_olap

@@ -1,26 +1,30 @@
-namespace simple_olap
-{
-    struct ProjectionSpec
-    {
-        std::vector<uint32_t> input_slots;
-    };
+#pragma once
 
-    class ProjectionOperator : public Operator
-    {
-    public:
-        ProjectionOperator(
-            std::unique_ptr<Operator> child,
-            ProjectionSpec spec);
+#include <memory>
+#include <vector>
 
-        void Init() override;
+#include "../expression/exec_expression.h"
+#include "../operator.h"
 
-        bool Next(VectorBatch &output) override;
+namespace simple_olap {
 
-    private:
-        std::unique_ptr<Operator> child_;
+class ProjectionOperator final : public Operator {
+public:
+    ProjectionOperator(std::unique_ptr<Operator> child,
+                       std::vector<ExecExprPtr> expressions)
+        : child_(std::move(child)), expressions_(std::move(expressions)) {}
 
-        ProjectionSpec spec_;
+    void Init() override;
+    bool Next(VectorBatch &output) override;
 
-        VectorBatch input_;
-    };
-}
+private:
+    bool AllDirectColumnRefs() const;
+    bool ProduceViewProjection(VectorBatch &output);
+    bool ProduceMaterializedProjection(VectorBatch &output);
+
+    std::unique_ptr<Operator> child_;
+    std::vector<ExecExprPtr> expressions_;
+    VectorBatch input_{true};
+};
+
+} // namespace simple_olap
