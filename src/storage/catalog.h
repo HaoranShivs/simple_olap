@@ -29,6 +29,9 @@ namespace simple_olap
         // 按表名获取表：不存在返回 nullptr；存在但未载入内存则自动 LoadTable
         Table *GetTable(const std::string &table_name);
 
+        // 按 table_id 获取表：id 不存在返回 nullptr；存在但未载入内存则自动从硬盘打开
+        Table *GetTable(TableId table_id);
+
         bool FlushTable(const std::string &table_name);
 
         // ---------- Read Metadata ----------

@@ -76,7 +76,7 @@ namespace simple_olap
         // ============ 公共成员 ============
 
         std::vector<ColumnData> columns;  ///< 各列数据
-        std::vector<uint32_t> sel_vector; ///< 选择向量：有效行的局部索引
+        std::vector<uint32_t> sel_vector; ///< 选择向量：有效行的 physical 局部索引
         uint32_t size = 0;                ///< 当前 batch 有效行数
 
         // ----------- 视图 或 实际数据------

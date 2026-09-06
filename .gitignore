@@ -2,3 +2,4 @@ build/
 database/
 my_planner.tar
 *:Zone.Identifier
+.clang-format

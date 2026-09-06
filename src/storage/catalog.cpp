@@ -248,4 +248,40 @@ namespace simple_olap
         return tables_ptr[*id].get();
     }
 
+    Table *Catalog::GetTable(TableId table_id)
+    {
+        // 1. 已载入内存则直接返回
+        const auto it = tables_ptr.find(table_id);
+        if (it != tables_ptr.end())
+        {
+            return it->second.get();
+        }
+
+        // 2. 未载入内存：先确认元数据中存在该 table_id，再从硬盘打开
+        bool id_exists = false;
+        for (const auto &kv : metadata_.table_name_id)
+        {
+            if (kv.second == table_id)
+            {
+                id_exists = true;
+                break;
+            }
+        }
+        if (!id_exists)
+        {
+            return nullptr;
+        }
+
+        // 3. 从硬盘打开表（root_path_ / tables / {table_id}）
+        auto table = Table::Open(table_id, root_path_ / "tables");
+        if (!table)
+        {
+            return nullptr;
+        }
+
+        // 4. 存入内存并返回表指针（生命周期由 tables_ptr 持有）
+        tables_ptr[table_id] = std::move(table);
+        return tables_ptr[table_id].get();
+    }
+
 } // namespace simple_olap
