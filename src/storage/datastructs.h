@@ -29,13 +29,26 @@ struct Condition {
     std::variant<int32_t, int64_t, double, std::string> value;
 };
 
+// struct ScanOptions {
+//     uint64_t start_row = 0;        // 起始行
+//     uint64_t end_row = UINT64_MAX; // 结束行
+//     std::vector<ColumnId> columns; // 需要读取的列，空表示全部
+//     // 过滤条件；has_where 为 false 时忽略 cond
+//     bool has_where = false;
+//     Condition cond;
+// };
+
 struct ScanOptions {
-    uint64_t start_row = 0;        // 起始行
-    uint64_t end_row = UINT64_MAX; // 结束行
-    std::vector<ColumnId> columns; // 需要读取的列，空表示全部
-    // 过滤条件；has_where 为 false 时忽略 cond
-    bool has_where = false;
-    Condition cond;
+    uint64_t start_row = 0;
+    uint64_t end_row = UINT64_MAX;
+
+    std::vector<ColumnId> columns;
+
+    // AND semantics.
+    //
+    // 这里的 predicate 已经是 optimizer
+    // 确认 Storage 能精确处理的谓词。
+    std::vector<Condition> predicates;
 };
 
 struct ColumnSchema {

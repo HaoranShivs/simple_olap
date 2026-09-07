@@ -84,8 +84,8 @@ void VectorBatch::Reset() {
 }
 
 void VectorBatch::CompactBySel() {
-    if (sel_vector.size() == size) {
-        return; // 全部命中，无需压缩
+    if (sel_vector.empty()) {
+        return; // identity selection
     }
 
     const uint32_t new_count = static_cast<uint32_t>(sel_vector.size());
@@ -98,6 +98,7 @@ void VectorBatch::CompactBySel() {
         }
         col.ReplaceWith(std::move(compact), new_count);
     }
+    sel_vector.clear();
     size = new_count;
 }
 } // namespace simple_olap

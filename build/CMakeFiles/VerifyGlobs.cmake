@@ -5,10 +5,13 @@
 file(GLOB_RECURSE NEW_GLOB LIST_DIRECTORIES false "/home/orangepi3/Projects/simple_olap/src/*.cpp")
 set(OLD_GLOB
   "/home/orangepi3/Projects/simple_olap/src/database.cpp"
-  "/home/orangepi3/Projects/simple_olap/src/execution/aggregate/aggregate.cpp"
-  "/home/orangepi3/Projects/simple_olap/src/execution/executor.cpp"
+  "/home/orangepi3/Projects/simple_olap/src/execution/aggregate/hash_aggregate.cpp"
+  "/home/orangepi3/Projects/simple_olap/src/execution/command_executor.cpp"
+  "/home/orangepi3/Projects/simple_olap/src/execution/executor_builder.cpp"
+  "/home/orangepi3/Projects/simple_olap/src/execution/expression/exec_expression.cpp"
   "/home/orangepi3/Projects/simple_olap/src/execution/filter/filter.cpp"
-  "/home/orangepi3/Projects/simple_olap/src/execution/scan/scan.cpp"
+  "/home/orangepi3/Projects/simple_olap/src/execution/projection/projection.cpp"
+  "/home/orangepi3/Projects/simple_olap/src/execution/scan/seq_scan.cpp"
   "/home/orangepi3/Projects/simple_olap/src/execution/vector/vector.cpp"
   "/home/orangepi3/Projects/simple_olap/src/main.cpp"
   "/home/orangepi3/Projects/simple_olap/src/planner/binder.cpp"
