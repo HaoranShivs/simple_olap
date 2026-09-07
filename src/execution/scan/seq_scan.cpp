@@ -2,7 +2,7 @@
 
 #include <stdexcept>
 
-#include "../../storage/catalog.h"
+#include "../../catalog/catalog.h"
 #include "../../storage/table/table.h"
 #include "../batch_utils.h"
 
@@ -15,14 +15,13 @@ void SeqScanOperator::Init() {
 
     table_ = ctx_->catalog->GetTable(table_id_);
     if (table_ == nullptr) {
-        throw std::runtime_error("SeqScanOperator: table not found: " +
-                                 std::to_string(table_id_));
+        throw std::runtime_error("SeqScanOperator: table not found: " + std::to_string(table_id_));
     }
 
     cursor_ = ScanCursor{};
 }
 
-bool SeqScanOperator::Next(VectorBatch &batch) {
+bool SeqScanOperator::Next(VectorBatch& batch) {
     if (table_ == nullptr) {
         throw std::runtime_error("SeqScanOperator::Next called before Init");
     }

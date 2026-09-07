@@ -4,7 +4,7 @@
 #include <stdexcept>
 #include <type_traits>
 
-#include "../storage/catalog.h"
+#include "../catalog/catalog.h"
 #include "../storage/table/table.h"
 #include "aggregate/hash_aggregate.h"
 #include "expression/exec_expression.h"
