@@ -8,25 +8,9 @@
 #include <unordered_map>
 
 namespace simple_olap {
-// struct ScanCursor;
+struct ScanCursor;
 class VectorBatch;
 class TableScan;
-
-struct ScanCursor {
-    // 实际上你这里现在是 segment_ids
-    // 数组中的 index。
-    SegmentId segment_id = 0;
-    uint32_t offset_in_segment = 0;
-    bool segment_decision_valid = false;
-    std::vector<uint8_t> row_filter_mask;
-
-    void reset() {
-        segment_id += 1;
-        offset_in_segment = 0;
-        segment_decision_valid = false;
-        row_filter_mask.clear();
-    }
-};
 
 class StorageManager {
   public:

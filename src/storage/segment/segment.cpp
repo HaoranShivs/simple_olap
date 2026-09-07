@@ -104,51 +104,118 @@ static bool CondValueAsDouble(const Condition& cond, double& out) {
     return false; // VARCHAR 条件无法用 min/max 剪枝
 }
 
-// segment 级 min/max 剪枝：根据列统计信息判断整个 segment 是否可能命中条件。
-// 返回 true 表示可以安全跳过本 segment（无行能满足条件）。
-static bool CanPruneByStats(const ColumnChunkMeta& meta, const Condition& cond) {
-    // 无统计信息（VARCHAR / 空列）时保守地不剪枝
+// segment 级 min/max 三态判断：根据列统计信息判断单个 predicate 与整个 segment 的关系。
+//   SKIP        -> 整个 segment 无行能满足条件，可安全跳过
+//   ALL_MATCH   -> 该 predicate 对 segment 内所有行恒成立，行级无需再判断
+//   NEED_FILTER -> metadata 无法决定，需要行级精确过滤
+static SegmentMatch EvaluateByStats(const ColumnChunkMeta& meta, const Condition& cond) {
+    // 没有统计信息：不能 prune，也不能证明 all-match
     if (!meta.has_stats) {
-        return false;
+        return SegmentMatch::NEED_FILTER;
     }
-    double v = 0.0;
-    if (!CondValueAsDouble(cond, v)) {
-        return false;
+
+    double value = 0.0;
+    if (!CondValueAsDouble(cond, value)) {
+        return SegmentMatch::NEED_FILTER;
     }
+
+    const double min = meta.min_value;
+    const double max = meta.max_value;
 
     switch (cond.op) {
     case CmpOp::EQ:
-        // 值落在 [min, max] 之外则不可能相等
-        return v < meta.min_value || v > meta.max_value;
+        if (value < min || value > max) {
+            return SegmentMatch::SKIP;
+        }
+        if (min == value && max == value) {
+            return SegmentMatch::ALL_MATCH;
+        }
+        return SegmentMatch::NEED_FILTER;
+
     case CmpOp::NE:
-        // 列内所有值都等于比较值，则没有行能满足 !=
-        return meta.min_value == v && meta.max_value == v;
+        if (min == value && max == value) {
+            return SegmentMatch::SKIP;
+        }
+        if (value < min || value > max) {
+            return SegmentMatch::ALL_MATCH;
+        }
+        return SegmentMatch::NEED_FILTER;
+
     case CmpOp::GT:
-        // 最大值都不大于比较值
-        return meta.max_value <= v;
+        if (max <= value) {
+            return SegmentMatch::SKIP;
+        }
+        if (min > value) {
+            return SegmentMatch::ALL_MATCH;
+        }
+        return SegmentMatch::NEED_FILTER;
+
     case CmpOp::GE:
-        return meta.max_value < v;
+        if (max < value) {
+            return SegmentMatch::SKIP;
+        }
+        if (min >= value) {
+            return SegmentMatch::ALL_MATCH;
+        }
+        return SegmentMatch::NEED_FILTER;
+
     case CmpOp::LT:
-        // 最小值都不小于比较值
-        return meta.min_value >= v;
+        if (min >= value) {
+            return SegmentMatch::SKIP;
+        }
+        if (max < value) {
+            return SegmentMatch::ALL_MATCH;
+        }
+        return SegmentMatch::NEED_FILTER;
+
     case CmpOp::LE:
-        return meta.min_value > v;
+        if (min > value) {
+            return SegmentMatch::SKIP;
+        }
+        if (max <= value) {
+            return SegmentMatch::ALL_MATCH;
+        }
+        return SegmentMatch::NEED_FILTER;
     }
-    return false;
+
+    return SegmentMatch::NEED_FILTER;
 }
 
-bool SegmentReader::GetVectorBatch(const ScanOptions& scanoptions, uint32_t offset, VectorBatch& output) {
-    // ============ 1. min/max 剪枝 ============
-    // 仅在 segment 起点（offset == 0）时检查一次，避免每批都重复判断
-    if (offset == 0 && scanoptions.has_where) {
-        const ColumnChunkMeta& cond_meta = GetColumnMeta(scanoptions.cond.column);
-        if (CanPruneByStats(cond_meta, scanoptions.cond)) {
-            // 整个 segment 都不可能有满足条件的行，直接跳过
-            return false;
+SegmentFilterDecision SegmentReader::EvaluatePredicates(const std::vector<Condition>& predicates) const {
+    SegmentFilterDecision decision;
+
+    decision.row_filter_mask.resize(predicates.size(), 0);
+
+    for (size_t i = 0; i < predicates.size(); ++i) {
+        const Condition& cond = predicates[i];
+
+        const auto& meta = GetColumnMeta(cond.column);
+
+        const SegmentMatch match = EvaluateByStats(meta, cond);
+
+        // AND 语义：
+        // 任意 predicate 不可能满足，整个 segment 都不能满足。
+        if (match == SegmentMatch::SKIP) {
+            decision.skip_segment = true;
+            decision.row_filter_mask.clear();
+            return decision;
+        }
+
+        if (match == SegmentMatch::NEED_FILTER) {
+            decision.row_filter_mask[i] = 1;
         }
     }
 
-    // ============ 2. 批量扫描 ============
+    return decision;
+}
+
+bool SegmentReader::GetVectorBatch(const ScanOptions& scanoptions, uint32_t offset, VectorBatch& output) {
+    // ============ 批量扫描 ============
+    //
+    // 注意：本方法不再负责 predicate 语义。
+    // metadata 判断（EvaluatePredicates）与行级过滤（ApplyRowPredicates）
+    // 由 StorageManager 统一编排，SegmentReader 只负责：
+    //   metadata access + column access + batch scan。
     const uint32_t segment_rows = metadata_.row_count;
     if (offset >= segment_rows) {
         // 已越过 segment 末尾，无数据可读

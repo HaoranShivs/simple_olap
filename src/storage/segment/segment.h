@@ -44,10 +44,15 @@ class SegmentReader {
 
     const ColumnChunkMeta& GetColumnMeta(ColumnId id) const noexcept;
 
-    // 大致步骤：
-    // 1. 检查 scanoptions
-    // 中的where条件和对应的列的metadata，其中记录着最大值和最小值，根据这个可以判断列是否符合条件。当然不是每次运行都进行检查，只有当offset==0时才进行。
-    // 2.以offset为segment内部的起点，扫描 1024（预先设置的值）行所要求列的数据到output
+    // 用 segment 列统计信息（min/max）对每个 pushed predicate 做三态判断：
+    //   SKIP        -> 整个 segment 不可能有满足条件的行
+    //   ALL_MATCH   -> 该 predicate 对整个 segment 恒成立，行级无需再判断
+    //   NEED_FILTER -> 该 predicate 需要进入行级过滤
+    // 返回的 SegmentFilterDecision::row_filter_mask 与 predicates 一一对应。
+    SegmentFilterDecision EvaluatePredicates(const std::vector<Condition>& predicates) const;
+
+    // 以 offset 为 segment 内部的起点，扫描最多 1024 行所要求列的数据到 output。
+    // 本方法不再负责 predicate 语义（metadata 判断 / 行过滤由 StorageManager 编排）。
     bool GetVectorBatch(const ScanOptions& scanoptions, uint32_t offset, VectorBatch& output);
 
   private:

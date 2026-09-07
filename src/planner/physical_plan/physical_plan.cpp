@@ -5,7 +5,9 @@
 namespace simple_olap {
 
 namespace {
-std::string Pad(size_t n) { return std::string(n, ' '); }
+std::string Pad(size_t n) {
+    return std::string(n, ' ');
+}
 
 } // namespace
 
@@ -13,11 +15,13 @@ std::string PhysicalSeqScan::ToString(size_t indent) const {
     std::ostringstream out;
     out << Pad(indent) << "PhysicalSeqScan(table=" << table_oid_ << ", columns=[";
     for (size_t i = 0; i < columns_.size(); ++i) {
-        if (i) out << ",";
+        if (i)
+            out << ",";
         out << columns_[i];
     }
     out << "]";
-    if (predicate_) out << ", pushed_predicate=true";
+    if (!predicates_.empty())
+        out << ", pushed=" << predicates_.size();
     out << ")";
     return out.str();
 }
@@ -35,8 +39,8 @@ std::string PhysicalProject::ToString(size_t indent) const {
 
 std::string PhysicalHashAggregate::ToString(size_t indent) const {
     std::ostringstream out;
-    out << Pad(indent) << "PhysicalHashAggregate(groups=" << group_by_.size()
-        << ", outputs=" << outputs_.size() << ")\n";
+    out << Pad(indent) << "PhysicalHashAggregate(groups=" << group_by_.size() << ", outputs=" << outputs_.size()
+        << ")\n";
     out << child_->ToString(indent + 2);
     return out.str();
 }

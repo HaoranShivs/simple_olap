@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <stdexcept>
 
 #include "../../execution/vector/vector.h"
 
@@ -152,87 +153,160 @@ SegmentReader* StorageManager::GetSegmentReader(SegmentId id) {
     return reader_cache_[id].get();
 }
 
-bool StorageManager::GetVectorBatch(const ScanOptions& options, ScanCursor& cursor, VectorBatch& output) {
-    // 创建副本，避免修改调用方的 ScanOptions
-    ScanOptions actual = options;
+// Invariant 1:
+//   A pushed predicate must be executable exactly by Storage.
+//   （Optimizer 只下推 Storage 能精确执行的谓词；执行失败应报内部错误，
+//     而不是保守保留导致 SQL 结果错误。）
+//
+// Invariant 2:
+//   Once a predicate is pushed into Scan, it must be removed from the
+//   residual Filter.（避免重复过滤是 Optimizer 的职责。）
+//
+// Invariant 3:
+//   Metadata ALL_MATCH predicates must not be evaluated again at row level.
+//   （row_filter_mask 为 0 的 predicate 在本 segment 内不再逐行判断。）
 
-    // 如果 WHERE 列不在请求列中，临时追加到 actual.columns，过滤完成后再移除（按照where条件只有1个设计）
-    bool appended_filter_column = false;
+// 行级精确判断单个 predicate：lhs op rhs。
+// 与旧实现不同：无法比较时抛异常而不是保守保留。
+// 一个 predicate 一旦进入 Storage，就意味着 Optimizer 已承诺 Storage 可精确执行。
+static bool EvaluateCondition(const ColumnData& column, uint32_t row, const Condition& cond) {
+    double lhs = 0.0;
+    double rhs = 0.0;
 
-    if (actual.has_where && !actual.columns.empty()) {
-        if (std::find(actual.columns.begin(), actual.columns.end(), actual.cond.column) == actual.columns.end()) {
-            actual.columns.push_back(actual.cond.column);
-            appended_filter_column = true;
+    if (!ColumnValueAsDouble(column, row, lhs)) {
+        throw std::runtime_error("pushed predicate contains unsupported column type");
+    }
+
+    if (!ColumnValueAsDoubleFromVariant(cond.value, rhs)) {
+        throw std::runtime_error("pushed predicate contains unsupported literal type");
+    }
+
+    return CompareDouble(lhs, cond.op, rhs);
+}
+
+// 多 predicate 行过滤：按 predicate 逐个收缩 selection vector。
+// 好处：predicate A 把 1024 行过滤到 50 行后，predicate B 只需执行 50 次。
+static void ApplyRowPredicates(const ScanOptions& options, const std::vector<uint8_t>& row_filter_mask,
+                               VectorBatch& output) {
+    const uint32_t physical_rows = output.size;
+
+    std::vector<uint32_t> selection;
+    selection.reserve(physical_rows);
+
+    for (uint32_t row = 0; row < physical_rows; ++row) {
+        selection.push_back(row);
+    }
+
+    for (size_t p = 0; p < options.predicates.size(); ++p) {
+        // metadata 已经证明这个 predicate 对整个 segment ALL_MATCH，跳过
+        if (!row_filter_mask[p]) {
+            continue;
+        }
+
+        const Condition& cond = options.predicates[p];
+
+        // 定位 predicate 列在 output 中的下标
+        const auto it = std::find(options.columns.begin(), options.columns.end(), cond.column);
+        if (it == options.columns.end()) {
+            throw std::runtime_error("predicate column is not scanned");
+        }
+
+        const size_t slot = static_cast<size_t>(it - options.columns.begin());
+        const ColumnData& column = output.columns[slot];
+
+        size_t write = 0;
+        for (size_t read = 0; read < selection.size(); ++read) {
+            const uint32_t row = selection[read];
+            if (EvaluateCondition(column, row, cond)) {
+                selection[write++] = row;
+            }
+        }
+        selection.resize(write);
+
+        if (selection.empty()) {
+            break;
         }
     }
 
-    // ---------- 跨 segment 推进游标 ----------
+    if (selection.size() == physical_rows) {
+        // identity selection：全部行通过，无需 sel_vector
+        output.sel_vector.clear();
+        output.size = physical_rows;
+        return;
+    }
+
+    output.sel_vector = std::move(selection);
+    output.size = static_cast<uint32_t>(output.sel_vector.size());
+}
+
+bool StorageManager::GetVectorBatch(const ScanOptions& options, ScanCursor& cursor, VectorBatch& output) {
     const auto& segment_ids = table_meta_.segment_ids;
+
     while (cursor.segment_id < segment_ids.size()) {
         const SegmentId seg_id = segment_ids[cursor.segment_id];
+
         SegmentReader* reader = GetSegmentReader(seg_id);
         if (reader == nullptr) {
             // 打开失败：跳过该 segment，继续尝试下一个
-            cursor.segment_id += 1;
-            cursor.offset_in_segment = 0;
+            cursor.AdvanceSegment();
             continue;
         }
 
-        // 从当前 segment 的 offset_in_segment 处扫描一批（最多 1024 行）；
-        // 返回 false 表示本 segment 无数据（读完或被 min/max 剪枝）
-        const bool scanned = reader->GetVectorBatch(actual, cursor.offset_in_segment, output);
+        // =====================================
+        // 第一层：每个 segment 只做一次 metadata 判断
+        // =====================================
+        if (!cursor.segment_decision_valid) {
+            const auto decision = reader->EvaluatePredicates(options.predicates);
 
-        if (!scanned || output.size == 0) {
-            cursor.segment_id += 1;
-            cursor.offset_in_segment = 0;
-            continue;
-        }
-
-        // 有数据：游标在本 segment 内前移
-        cursor.offset_in_segment += output.size;
-
-        // ---------- 行级过滤 ----------
-        if (actual.has_where) {
-            // 定位 where 列在 output 中的下标
-            const auto where_it = std::find(actual.columns.begin(), actual.columns.end(), actual.cond.column);
-            const size_t where_idx = static_cast<size_t>(where_it - actual.columns.begin());
-
-            double rhs = 0.0;
-            const bool rhs_ok = ColumnValueAsDoubleFromVariant(actual.cond.value, rhs);
-
-            output.sel_vector.clear();
-            const auto& where_col = output.columns[where_idx];
-            for (uint32_t row = 0; row < output.size; ++row) {
-                double lhs = 0.0;
-                if (!rhs_ok || !ColumnValueAsDouble(where_col, row, lhs)) {
-                    // 无法比较（字符串等）：保守保留该行
-                    output.sel_vector.push_back(row);
-                    continue;
-                }
-                if (CompareDouble(lhs, actual.cond.op, rhs)) {
-                    output.sel_vector.push_back(row);
-                }
-            }
-
-            if (appended_filter_column) {
-                // 移除为过滤而追加的 where 列 (假设where列只有 1 列)
-                output.columns.pop_back();
-            }
-
-            if (output.sel_vector.empty()) {
-                // 本批全部被过滤：继续循环读下一批
+            if (decision.skip_segment) {
+                // 整个 segment 都不可能有满足条件的行，直接跳过
+                cursor.AdvanceSegment();
                 continue;
             }
 
-            // 优化：如果所有行都通过过滤，清空 sel_vector（语义：全部有效）
-            if (output.sel_vector.size() == output.size) {
-                output.sel_vector.clear();
-            }
-            output.size = static_cast<uint32_t>(output.sel_vector.size());
-            return true;
+            cursor.row_filter_mask = decision.row_filter_mask;
+            cursor.segment_decision_valid = true;
         }
 
-        output.sel_vector.clear();
+        // =====================================
+        // 第二层：读取 physical batch
+        // =====================================
+        const bool scanned = reader->GetVectorBatch(options, cursor.offset_in_segment, output);
+
+        if (!scanned || output.size == 0) {
+            // 本 segment 已读完，推进到下一个
+            cursor.AdvanceSegment();
+            continue;
+        }
+
+        // 非常重要：
+        // cursor 必须按“扫描的物理行数”前进，而不是过滤后的有效行数。
+        const uint32_t scanned_rows = output.size;
+        cursor.offset_in_segment += scanned_rows;
+
+        // =====================================
+        // 第三层：只有 metadata 无法决定的 predicate 才 row filter
+        // =====================================
+        bool need_row_filter = false;
+        for (uint8_t flag : cursor.row_filter_mask) {
+            if (flag) {
+                need_row_filter = true;
+                break;
+            }
+        }
+
+        if (need_row_filter) {
+            ApplyRowPredicates(options, cursor.row_filter_mask, output);
+
+            if (output.size == 0) {
+                // 本批全部被过滤：继续读下一批
+                continue;
+            }
+        } else {
+            // 所有 pushed predicate 对该 segment 都 ALL_MATCH
+            output.sel_vector.clear();
+        }
+
         return true;
     }
 

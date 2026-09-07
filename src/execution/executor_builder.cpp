@@ -101,17 +101,26 @@ BuiltExecutor ExecutorBuilder::BuildSeqScan(const PhysicalSeqScan& plan) const {
 
     ScanOptions options;
     options.columns = scan_columns;
-    if (plan.GetPredicate().has_value()) {
-        const auto& predicate = *plan.GetPredicate();
-        options.has_where = true;
-        options.cond.column = predicate.column_index;
-        options.cond.op = predicate.op;
+
+    // Invariant 1:
+    //   A pushed predicate must be executable exactly by Storage.
+    //   （Optimizer 只下推数值型 column cmp literal，Storage 行过滤可精确执行。）
+    //
+    // Invariant 2:
+    //   Once a predicate is pushed into Scan, it must be removed from the
+    //   residual Filter.（避免重复过滤是 Optimizer 的职责，不是 FilterOperator 的。）
+    options.predicates.reserve(plan.GetPredicates().size());
+    for (const auto& predicate : plan.GetPredicates()) {
+        Condition condition;
+        condition.column = static_cast<ColumnId>(predicate.column_index);
+        condition.op = predicate.op;
         // std::variant 之间不能直接赋值，用 visit 逐类型取出再包装进目标 variant
-        options.cond.value = std::visit(
+        condition.value = std::visit(
             [](const auto& v) -> std::variant<int32_t, int64_t, double, std::string> {
                 return v; // 所有备选类型都直接透传
             },
             predicate.value);
+        options.predicates.push_back(std::move(condition));
     }
 
     ExecSchema output_schema;

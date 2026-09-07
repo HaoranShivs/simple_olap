@@ -18,9 +18,28 @@ constexpr uint32_t kMaxSegmentRowCount = 65536;
 // CmpOp 定义在 type.h（公共层），此处不再重复定义
 
 // 扫描游标：记录当前读取位置
+//
+// segment_id 实际上是 table_meta_.segment_ids 数组中的下标。
 struct ScanCursor {
-    SegmentId segment_id = 0;       // 当前 segment id
+    SegmentId segment_id = 0;       // segment_ids 数组中的 index
     uint32_t offset_in_segment = 0; // 在当前 segment 内的行偏移
+
+    // 当前 segment 的 metadata 判断结果是否有效。
+    // 每个 segment 只在起点做一次 metadata 判断，之后整个 segment 复用。
+    bool segment_decision_valid = false;
+
+    // 与 ScanOptions::predicates 一一对应：
+    //   1: 该 predicate 在当前 segment 需要逐行精确执行（NEED_FILTER）
+    //   0: metadata 已证明全部满足（ALL_MATCH），行级不再判断
+    std::vector<uint8_t> row_filter_mask;
+
+    // 进入下一个 segment 时统一调用
+    void AdvanceSegment() {
+        segment_id += 1;
+        offset_in_segment = 0;
+        segment_decision_valid = false;
+        row_filter_mask.clear();
+    }
 };
 
 struct Condition {
@@ -28,15 +47,6 @@ struct Condition {
     CmpOp op = CmpOp::EQ;
     std::variant<int32_t, int64_t, double, std::string> value;
 };
-
-// struct ScanOptions {
-//     uint64_t start_row = 0;        // 起始行
-//     uint64_t end_row = UINT64_MAX; // 结束行
-//     std::vector<ColumnId> columns; // 需要读取的列，空表示全部
-//     // 过滤条件；has_where 为 false 时忽略 cond
-//     bool has_where = false;
-//     Condition cond;
-// };
 
 struct ScanOptions {
     uint64_t start_row = 0;
