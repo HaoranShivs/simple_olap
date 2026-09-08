@@ -138,6 +138,13 @@ BoundStatementPtr Binder::BindInsert(const InsertStatement& stmt) {
         bound_row.reserve(row.size());
 
         for (size_t i = 0; i < row.size(); ++i) {
+            // INSERT VALUES 只允许常量表达式（字面量 / 常量算术）。
+            // 列引用与聚合在 INSERT 上下文无语义；且 BindInsert 不构建
+            // BinderContext，直接 BindExpr 会解引用空 context_ 导致段错误。
+            if (row[i]->type == Expr::Type::COLUMN_REF || row[i]->type == Expr::Type::AGG_FUNC) {
+                throw SemanticException("INSERT VALUES must be constant expressions, got: " + row[i]->ToString());
+            }
+
             // 绑定表达式 (通常是字面量，也可能是简单的算术表达式)
             auto bound_expr = BindExpr(*row[i]);
 
@@ -353,8 +360,26 @@ void Binder::BindTableRef(const std::string& table_name) {
 
 std::vector<BoundSelectItem> Binder::BindSelectList(const std::vector<SelectItem>& select_list) {
     std::vector<BoundSelectItem> bound_list;
-    bound_list.reserve(select_list.size());
 
+    // SELECT * 展开：parser 把 * 编码成 ColumnRefExpr("*")，
+    // 这里按 FROM 表的 schema 顺序展开成全部列（alias 用列名，供结果集表头使用）
+    if (select_list.size() == 1) {
+        const auto& only = *select_list[0].expr;
+        if (only.type == Expr::Type::COLUMN_REF && static_cast<const ColumnRefExpr&>(only).column_name == "*") {
+            if (context_->tables_.empty()) {
+                throw SemanticException("SELECT * requires a FROM table");
+            }
+            const auto& table = context_->tables_[0];
+            bound_list.reserve(table.columns.size());
+            for (uint32_t i = 0; i < static_cast<uint32_t>(table.columns.size()); ++i) {
+                bound_list.emplace_back(std::make_unique<BoundColumnRef>(table.oid, i, table.columns[i].type),
+                                        table.columns[i].name);
+            }
+            return bound_list;
+        }
+    }
+
+    bound_list.reserve(select_list.size());
     for (const auto& item : select_list) {
         // SelectItem 持有 AST 表达式 (ExprPtr)，递归绑定成 BoundExpr，并保留别名
         bound_list.emplace_back(BindExpr(*item.expr), item.alias);

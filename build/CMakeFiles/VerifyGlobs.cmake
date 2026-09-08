@@ -7,6 +7,7 @@ set(OLD_GLOB
   "/home/orangepi3/Projects/simple_olap/src/catalog/catalog.cpp"
   "/home/orangepi3/Projects/simple_olap/src/execution/aggregate/hash_aggregate.cpp"
   "/home/orangepi3/Projects/simple_olap/src/execution/command_executor.cpp"
+  "/home/orangepi3/Projects/simple_olap/src/execution/execution_engine.cpp"
   "/home/orangepi3/Projects/simple_olap/src/execution/executor_builder.cpp"
   "/home/orangepi3/Projects/simple_olap/src/execution/expression/exec_expression.cpp"
   "/home/orangepi3/Projects/simple_olap/src/execution/filter/filter.cpp"

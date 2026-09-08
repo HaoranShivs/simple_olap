@@ -5,7 +5,7 @@
 namespace simple_olap {
 
 Database::Database(std::filesystem::path path, DatabaseConfig config)
-    : path_(std::move(path)), config_(std::move(config)), catalog_(), storage_manager_(path_, catalog_),
+    : path_(std::move(path)), config_(std::move(config)), catalog_(), storage_manager_(path_),
       thread_pool_(config_.thread_count) {
 
     Initialize();

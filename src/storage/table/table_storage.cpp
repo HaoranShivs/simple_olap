@@ -255,6 +255,13 @@ void TableStorage::SealActiveSegment() {
 }
 
 bool TableStorage::Flush() {
+    // 0. 活跃 segment 非空时先封存：Scan 只读已落盘 segment，
+    //    不封存的话刚 Append 的数据对查询不可见（析构兜底也是同样语义）
+    if (active_segment_ != nullptr && active_segment_->row_count() > 0) {
+        SealActiveSegment();
+        CreateActiveSegment();
+    }
+
     // 1. 将内存中所有待刷盘 segment 写盘，并把 id 登记进 TableStorageMeta。
     //    文件命名格式固定：table_path_ / {segment_id}，与 SegmentBuilder::Flush /
     //    SegmentReader::Open 的约定一致。

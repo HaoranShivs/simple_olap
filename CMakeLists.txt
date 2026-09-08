@@ -28,6 +28,9 @@ file(GLOB_RECURSE PROJECT_SOURCES CONFIGURE_DEPENDS
 
 # main.cpp 单独作为可执行入口，其余编译成静态库
 list(FILTER PROJECT_SOURCES EXCLUDE REGEX ".*/main\\.cpp$")
+# main_test.cpp 是 sql 模块的独立手工编译测试（自带 main()，见文件头编译说明），
+# 不参与库构建
+list(FILTER PROJECT_SOURCES EXCLUDE REGEX ".*/main_test\\.cpp$")
 
 # ---------- 静态库：引擎核心 ----------
 add_library(simple_olap_core STATIC ${PROJECT_SOURCES})

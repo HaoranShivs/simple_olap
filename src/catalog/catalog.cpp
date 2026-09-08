@@ -7,6 +7,14 @@
 namespace simple_olap {
 // 元数据文件约定：位于 catalog 根目录下的 catalog.meta
 // Create / LoadMeta / SaveMeta 均以 root_path_ 为 catalog 根目录。
+//
+// 格式 v2（当前）：
+//   [magic "COL2"][entry 数量]{ [name][table_id][TableSchema] }...
+//   schema 的权威来源是 Catalog 本身，随 catalog.meta 一起持久化。
+// 格式 v1（旧，只读兼容）：
+//   [entry 数量]{ [name][table_id] }...
+//   schema 留空（旧库的 table.meta 是已废弃的 TableMeta 格式，不再回读）。
+constexpr uint32_t kCatalogMetaMagic = 0x324C4F43; // "COL2" 小端
 
 bool Catalog::Create(const std::filesystem::path& path) {
     // 1. 创建 catalog 根目录（含父目录）
@@ -49,36 +57,39 @@ bool Catalog::LoadMeta(const std::filesystem::path& path) {
         return false;
     }
 
-    // 3. 反序列化：旧格式只存 name -> id 映射，schema 从各表的
-    //    tables/{id}/table.meta 中补齐（保持磁盘格式向后兼容）
+    // 3. 反序列化：
+    //    v2 格式带 magic，schema 随 catalog.meta 持久化（权威来源）；
+    //    v1 旧格式只存 name -> id 映射，schema 留空（保持只读兼容）。
     try {
         BinaryReader reader(buffer);
-        CatalogMeta meta = CatalogMeta::Deserialize(reader);
 
         name_index_.clear();
         tables_.clear();
-        for (const auto& kv : meta.table_name_id) {
-            const TableId table_id = kv.second;
 
-            TableCatalogEntry entry;
-            entry.table_id = table_id;
-            entry.name = kv.first;
+        // v2：magic + 完整条目（序列化逻辑在 TableCatalogEntry 内部）
+        if (buffer.size() >= sizeof(uint32_t) && reader.ReadUInt32() == kCatalogMetaMagic) {
+            const uint32_t count = reader.ReadUInt32();
+            for (uint32_t i = 0; i < count; ++i) {
+                TableCatalogEntry entry = TableCatalogEntry::Deserialize(reader);
 
-            // schema 权威来源：tables/{table_id}/table.meta
-            const std::filesystem::path table_meta_path = path / "tables" / std::to_string(table_id) / "table.meta";
-            std::ifstream table_file(table_meta_path, std::ios::binary);
-            if (table_file) {
-                std::vector<uint8_t> table_buffer((std::istreambuf_iterator<char>(table_file)),
-                                                  std::istreambuf_iterator<char>());
-                BinaryReader table_reader(table_buffer);
-                TableMeta table_meta = TableMeta::Deserialize(table_reader);
-                entry.schema = std::move(table_meta.schema);
+                name_index_[entry.name] = entry.table_id;
+                tables_[entry.table_id] = std::move(entry);
             }
-            // table.meta 缺失时 schema 为空，GetTable 仍可用（scan 会失败），
-            // 不让单表损坏拖垮整个 catalog 加载
+        } else {
+            // v1：CatalogMeta（name -> id 映射），schema 留空
+            reader.SetFromVector(buffer);
+            CatalogMeta meta = CatalogMeta::Deserialize(reader);
 
-            name_index_[entry.name] = table_id;
-            tables_[table_id] = std::move(entry);
+            for (const auto& kv : meta.table_name_id) {
+                TableCatalogEntry entry;
+                entry.table_id = kv.second;
+                entry.name = kv.first;
+                // v1 库的 table.meta 是已废弃的 TableMeta 格式，不再回读 schema；
+                // schema 为空的表 GetTable 仍可用（scan 会失败），不让单表损坏拖垮整个 catalog
+
+                name_index_[entry.name] = entry.table_id;
+                tables_[entry.table_id] = std::move(entry);
+            }
         }
     } catch (const std::exception&) {
         // 文件损坏或格式不匹配
@@ -90,14 +101,13 @@ bool Catalog::LoadMeta(const std::filesystem::path& path) {
 }
 
 bool Catalog::SaveMeta() const {
-    // 序列化为旧格式（name -> id 映射），schema 留在 tables/{id}/table.meta
-    CatalogMeta meta;
-    for (const auto& kv : name_index_) {
-        meta.table_name_id[kv.first] = kv.second;
-    }
-
+    // v2 格式：magic + 完整条目（序列化逻辑在 TableCatalogEntry 内部）
     BinaryWriter writer;
-    meta.Serialize(writer);
+    writer.WriteUInt32(kCatalogMetaMagic);
+    writer.WriteUInt32(static_cast<uint32_t>(tables_.size()));
+    for (const auto& kv : tables_) {
+        kv.second.Serialize(writer);
+    }
 
     const std::filesystem::path meta_path = root_path_ / "catalog.meta";
     std::ofstream file(meta_path, std::ios::binary | std::ios::trunc);
