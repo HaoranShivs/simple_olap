@@ -4,7 +4,7 @@
 # PROJECT_SOURCES at CMakeLists.txt:26 (file)
 file(GLOB_RECURSE NEW_GLOB LIST_DIRECTORIES false "/home/orangepi3/Projects/simple_olap/src/*.cpp")
 set(OLD_GLOB
-  "/home/orangepi3/Projects/simple_olap/src/database.cpp"
+  "/home/orangepi3/Projects/simple_olap/src/catalog/catalog.cpp"
   "/home/orangepi3/Projects/simple_olap/src/execution/aggregate/hash_aggregate.cpp"
   "/home/orangepi3/Projects/simple_olap/src/execution/command_executor.cpp"
   "/home/orangepi3/Projects/simple_olap/src/execution/executor_builder.cpp"
@@ -14,6 +14,8 @@ set(OLD_GLOB
   "/home/orangepi3/Projects/simple_olap/src/execution/scan/seq_scan.cpp"
   "/home/orangepi3/Projects/simple_olap/src/execution/vector/vector.cpp"
   "/home/orangepi3/Projects/simple_olap/src/main.cpp"
+  "/home/orangepi3/Projects/simple_olap/src/main/connection.cpp"
+  "/home/orangepi3/Projects/simple_olap/src/main/database.cpp"
   "/home/orangepi3/Projects/simple_olap/src/planner/binder.cpp"
   "/home/orangepi3/Projects/simple_olap/src/planner/logical_plan/logical_plan.cpp"
   "/home/orangepi3/Projects/simple_olap/src/planner/optimizer/optimizer.cpp"
@@ -26,14 +28,13 @@ set(OLD_GLOB
   "/home/orangepi3/Projects/simple_olap/src/sql/lexer/lexer.cpp"
   "/home/orangepi3/Projects/simple_olap/src/sql/main_test.cpp"
   "/home/orangepi3/Projects/simple_olap/src/sql/parser/parser.cpp"
-  "/home/orangepi3/Projects/simple_olap/src/storage/catalog.cpp"
   "/home/orangepi3/Projects/simple_olap/src/storage/datachunk.cpp"
   "/home/orangepi3/Projects/simple_olap/src/storage/file/filewriter.cpp"
   "/home/orangepi3/Projects/simple_olap/src/storage/file/mappedfile.cpp"
   "/home/orangepi3/Projects/simple_olap/src/storage/segment/columnchunk.cpp"
   "/home/orangepi3/Projects/simple_olap/src/storage/segment/segment.cpp"
-  "/home/orangepi3/Projects/simple_olap/src/storage/table/storage_manager.cpp"
-  "/home/orangepi3/Projects/simple_olap/src/storage/table/table.cpp"
+  "/home/orangepi3/Projects/simple_olap/src/storage/storage_manager.cpp"
+  "/home/orangepi3/Projects/simple_olap/src/storage/table/table_storage.cpp"
   )
 if(NOT "${NEW_GLOB}" STREQUAL "${OLD_GLOB}")
   message("-- GLOB mismatch!")

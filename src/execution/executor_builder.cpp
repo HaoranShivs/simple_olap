@@ -5,7 +5,7 @@
 #include <type_traits>
 
 #include "../catalog/catalog.h"
-#include "../storage/table/table.h"
+#include "../storage/table/table_storage.h"
 #include "aggregate/hash_aggregate.h"
 #include "expression/exec_expression.h"
 #include "filter/filter.h"
@@ -76,12 +76,14 @@ BuiltExecutor ExecutorBuilder::BuildNode(const PhysicalPlan& plan) const {
 }
 
 BuiltExecutor ExecutorBuilder::BuildSeqScan(const PhysicalSeqScan& plan) const {
-    Table* table = ctx_->catalog->GetTable(plan.GetTableOid());
-    if (table == nullptr) {
+    // bind 阶段已结束：这里只从 Catalog 读 schema（纯内存），物理扫描
+    // 由 SeqScanOperator 通过 StorageManager 完成
+    const TableCatalogEntry* entry = ctx_->catalog->GetTable(plan.GetTableOid());
+    if (entry == nullptr) {
         throw std::runtime_error("ExecutorBuilder: scan table not found");
     }
 
-    const TableSchema& table_schema = table->GetSchema();
+    const TableSchema& table_schema = entry->schema;
     std::vector<ColumnId> scan_columns;
     scan_columns.reserve(plan.GetColumns().size());
     for (uint32_t column : plan.GetColumns()) {

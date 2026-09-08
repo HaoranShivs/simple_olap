@@ -320,45 +320,22 @@ int main() {
     // 保证无论从哪个工作目录运行，数据都落在项目内的 database/ 下
     std::filesystem::path database_path = SIMPLE_OLAP_ROOT_DIR "/database";
 
-    // 载入 catalog 元数据；不存在则新建
-    Catalog catalog;
-    if (!catalog.LoadMeta(database_path)) {
-        catalog.Create(database_path);
-    }
+    Database database(database_path);
+    Connection connection(database);
 
     PrintHelp();
 
-    // REPL 主循环：多行输入，遇到 ';' 才执行
-    std::string buffer;
-    std::string line;
-    std::cout << "sql> " << std::flush;
-    while (std::getline(std::cin, line)) {
-        // 去掉行首尾空白后判断退出命令
-        const size_t first = line.find_first_not_of(" \t\r\n");
-        if (first != std::string::npos) {
-            const size_t last = line.find_last_not_of(" \t\r\n");
-            const std::string trimmed = line.substr(first, last - first + 1);
-            if (buffer.empty() && (trimmed == "exit" || trimmed == "quit")) {
-                break;
-            }
+    std::string sql;
+
+    while (ReadSql(sql)) {
+        try {
+            QueryResult result = connection.Query(sql);
+
+            PrintResult(result);
+        } catch (const std::exception& e) {
+            std::cout << "ERROR: " << e.what() << "\n";
         }
-
-        buffer += line + "\n";
-
-        // 遇到分号则执行缓冲区中的语句
-        if (buffer.find(';') != std::string::npos) {
-            // 分号交给词法层处理（SEMICOLON token），直接整段送入流水线
-            try {
-                ExecuteSql(catalog, buffer);
-            } catch (const std::exception& e) {
-                std::cout << "ERROR: " << e.what() << "\n";
-            }
-            buffer.clear();
-        }
-
-        std::cout << (buffer.empty() ? "sql> " : "  -> ") << std::flush;
     }
 
-    std::cout << "\nbye\n";
     return 0;
 }

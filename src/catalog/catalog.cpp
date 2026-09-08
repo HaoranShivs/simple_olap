@@ -6,7 +6,7 @@
 
 namespace simple_olap {
 // 元数据文件约定：位于 catalog 根目录下的 catalog.meta
-// Create / LoadMeta / SaveMeta 的 path 参数均指 catalog 根目录。
+// Create / LoadMeta / SaveMeta 均以 root_path_ 为 catalog 根目录。
 
 bool Catalog::Create(const std::filesystem::path& path) {
     // 1. 创建 catalog 根目录（含父目录）
@@ -23,21 +23,11 @@ bool Catalog::Create(const std::filesystem::path& path) {
     }
 
     // 3. 初始化空元数据并写入磁盘
-    metadata_ = CatalogMeta{};
+    name_index_.clear();
+    tables_.clear();
     root_path_ = path;
 
-    BinaryWriter writer;
-    metadata_.Serialize(writer);
-
-    std::ofstream file(meta_path, std::ios::binary | std::ios::trunc);
-    if (!file) {
-        return false;
-    }
-
-    const auto& buffer = writer.GetBuffer();
-    file.write(reinterpret_cast<const char*>(buffer.data()), static_cast<std::streamsize>(buffer.size()));
-
-    return file.good();
+    return SaveMeta();
 }
 
 bool Catalog::LoadMeta(const std::filesystem::path& path) {
@@ -59,10 +49,37 @@ bool Catalog::LoadMeta(const std::filesystem::path& path) {
         return false;
     }
 
-    // 3. 反序列化到内存元数据
+    // 3. 反序列化：旧格式只存 name -> id 映射，schema 从各表的
+    //    tables/{id}/table.meta 中补齐（保持磁盘格式向后兼容）
     try {
         BinaryReader reader(buffer);
-        metadata_ = CatalogMeta::Deserialize(reader);
+        CatalogMeta meta = CatalogMeta::Deserialize(reader);
+
+        name_index_.clear();
+        tables_.clear();
+        for (const auto& kv : meta.table_name_id) {
+            const TableId table_id = kv.second;
+
+            TableCatalogEntry entry;
+            entry.table_id = table_id;
+            entry.name = kv.first;
+
+            // schema 权威来源：tables/{table_id}/table.meta
+            const std::filesystem::path table_meta_path = path / "tables" / std::to_string(table_id) / "table.meta";
+            std::ifstream table_file(table_meta_path, std::ios::binary);
+            if (table_file) {
+                std::vector<uint8_t> table_buffer((std::istreambuf_iterator<char>(table_file)),
+                                                  std::istreambuf_iterator<char>());
+                BinaryReader table_reader(table_buffer);
+                TableMeta table_meta = TableMeta::Deserialize(table_reader);
+                entry.schema = std::move(table_meta.schema);
+            }
+            // table.meta 缺失时 schema 为空，GetTable 仍可用（scan 会失败），
+            // 不让单表损坏拖垮整个 catalog 加载
+
+            name_index_[entry.name] = table_id;
+            tables_[table_id] = std::move(entry);
+        }
     } catch (const std::exception&) {
         // 文件损坏或格式不匹配
         return false;
@@ -72,18 +89,17 @@ bool Catalog::LoadMeta(const std::filesystem::path& path) {
     return true;
 }
 
-// 返回内存元数据的引用（只读用途：表名列表、表 id 查询等）
-CatalogMeta& Catalog::GetCatalogMeta() {
-    return metadata_;
-}
+bool Catalog::SaveMeta() const {
+    // 序列化为旧格式（name -> id 映射），schema 留在 tables/{id}/table.meta
+    CatalogMeta meta;
+    for (const auto& kv : name_index_) {
+        meta.table_name_id[kv.first] = kv.second;
+    }
 
-bool Catalog::SaveMeta(const std::filesystem::path& path) const {
-    // 1. 序列化元数据
     BinaryWriter writer;
-    metadata_.Serialize(writer);
+    meta.Serialize(writer);
 
-    // 2. 写入磁盘（覆盖已有文件）
-    const std::filesystem::path meta_path = path / "catalog.meta";
+    const std::filesystem::path meta_path = root_path_ / "catalog.meta";
     std::ofstream file(meta_path, std::ios::binary | std::ios::trunc);
     if (!file) {
         return false;
@@ -95,24 +111,26 @@ bool Catalog::SaveMeta(const std::filesystem::path& path) const {
     return file.good();
 }
 
+TableId Catalog::NextTableId() const {
+    TableId next = 0;
+    for (const auto& kv : tables_) {
+        if (kv.first >= next) {
+            next = kv.first + 1;
+        }
+    }
+    return next;
+}
+
 bool Catalog::CreateTable(const CreateTableStatement& stmt) {
     const std::string& table_name = stmt.table_name;
     const auto& columns = stmt.columns;
 
     // 1. 重名检查
-    if (metadata_.table_name_id.count(table_name) > 0) {
+    if (name_index_.count(table_name) > 0) {
         return false;
     }
 
-    // 2. 分配 table_id：现有最大 id + 1（空 catalog 从 1 开始）
-    uint32_t next_table_id = 0;
-    for (const auto& kv : metadata_.table_name_id) {
-        if (kv.second >= next_table_id) {
-            next_table_id = kv.second + 1;
-        }
-    }
-
-    // 3. 检查列名重复
+    // 2. 检查列名重复
     std::unordered_set<std::string> seen_column_names;
     for (const auto& col : columns) {
         if (seen_column_names.count(col.name) > 0) {
@@ -121,119 +139,71 @@ bool Catalog::CreateTable(const CreateTableStatement& stmt) {
         seen_column_names.insert(col.name);
     }
 
-    // 4. 转换 columns -> TableSchema（column_id 按顺序从 0 分配）
+    // 3. 转换 columns -> TableSchema（column_id 按顺序从 0 分配）
     TableSchema schema;
     schema.columns.reserve(columns.size());
     for (uint32_t i = 0; i < static_cast<uint32_t>(columns.size()); ++i) {
         schema.columns.push_back(ColumnSchema{i, columns[i].name, columns[i].type});
     }
 
-    // 5. 更新内存元数据
-    metadata_.table_name_id[table_name] = next_table_id;
+    // 4. 组装目录条目并登记（table_id 自动分配）
+    TableCatalogEntry entry;
+    entry.table_id = NextTableId();
+    entry.name = table_name;
+    entry.schema = std::move(schema);
 
-    // 6. 立即持久化元数据
-    if (!SaveMeta(root_path_)) {
-        // 持久化失败，回滚内存元数据
-        metadata_.table_name_id.erase(table_name);
+    name_index_[table_name] = entry.table_id;
+    tables_[entry.table_id] = std::move(entry);
+
+    // 5. 立即持久化元数据；失败则回滚内存状态
+    if (!SaveMeta()) {
+        const TableId rolled_back_id = name_index_[table_name];
+        name_index_.erase(table_name);
+        tables_.erase(rolled_back_id);
         return false;
     }
 
-    // 7. 调用 Table::Create 创建表数据目录（root_path_ / tables / {table_id}）
-    TableMeta table_meta;
-    table_meta.table_id = next_table_id;
-    table_meta.name = table_name;
-    table_meta.schema = schema;
+    return true;
+}
 
-    auto table = Table::Create(table_meta, root_path_ / "tables");
-    if (!table) {
-        // 创建失败，回滚内存元数据并重新持久化
-        metadata_.table_name_id.erase(table_name);
-        SaveMeta(root_path_);
+bool Catalog::DropTable(std::string_view table_name) {
+    const auto it = name_index_.find(std::string(table_name));
+    if (it == name_index_.end()) {
         return false;
     }
 
-    tables_ptr[next_table_id] = std::move(table);
+    const TableId table_id = it->second;
+    name_index_.erase(it);
+    tables_.erase(table_id);
+
+    if (!SaveMeta()) {
+        return false;
+    }
     return true;
 }
 
 std::optional<TableId> Catalog::FindTable(std::string_view table_name) const {
-    // 仅查元数据，不要求表已载入内存
-    const auto it = metadata_.table_name_id.find(std::string(table_name));
-    if (it == metadata_.table_name_id.end()) {
+    const auto it = name_index_.find(std::string(table_name));
+    if (it == name_index_.end()) {
         return std::nullopt;
     }
     return it->second;
 }
 
-bool Catalog::LoadTable(const std::string& table_name) {
-    // 1. 查元数据获取 table_id
-    std::optional<TableId> id = FindTable(table_name);
-    if (!id.has_value()) {
-        return false;
+const TableCatalogEntry* Catalog::GetTable(std::string_view table_name) const {
+    const auto it = name_index_.find(std::string(table_name));
+    if (it == name_index_.end()) {
+        return nullptr;
     }
-
-    // 2. 已载入内存则直接返回
-    if (tables_ptr.count(*id) > 0) {
-        return true;
-    }
-
-    // 3. 从硬盘打开表（root_path_ / tables / {table_id}）
-    auto table = Table::Open(*id, root_path_ / "tables");
-    if (!table) {
-        return false;
-    }
-
-    // 4. 存入内存
-    tables_ptr[*id] = std::move(table);
-    return true;
+    return &tables_.at(it->second);
 }
 
-Table* Catalog::GetTable(const std::string& table_name) {
-    // 1. 查元数据获取 table_id，不存在返回 nullptr
-    std::optional<TableId> id = FindTable(table_name);
-    if (!id.has_value()) {
+const TableCatalogEntry* Catalog::GetTable(TableId table_id) const {
+    const auto it = tables_.find(table_id);
+    if (it == tables_.end()) {
         return nullptr;
     }
-
-    // 2. 未载入内存则自动从硬盘打开
-    if (tables_ptr.count(*id) == 0) {
-        if (!LoadTable(table_name)) {
-            return nullptr;
-        }
-    }
-
-    // 3. 返回表指针（生命周期由 tables_ptr 持有）
-    return tables_ptr[*id].get();
-}
-
-Table* Catalog::GetTable(TableId table_id) {
-    // 1. 已载入内存则直接返回
-    const auto it = tables_ptr.find(table_id);
-    if (it != tables_ptr.end()) {
-        return it->second.get();
-    }
-
-    // 2. 未载入内存：先确认元数据中存在该 table_id，再从硬盘打开
-    bool id_exists = false;
-    for (const auto& kv : metadata_.table_name_id) {
-        if (kv.second == table_id) {
-            id_exists = true;
-            break;
-        }
-    }
-    if (!id_exists) {
-        return nullptr;
-    }
-
-    // 3. 从硬盘打开表（root_path_ / tables / {table_id}）
-    auto table = Table::Open(table_id, root_path_ / "tables");
-    if (!table) {
-        return nullptr;
-    }
-
-    // 4. 存入内存并返回表指针（生命周期由 tables_ptr 持有）
-    tables_ptr[table_id] = std::move(table);
-    return tables_ptr[table_id].get();
+    return &it->second;
 }
 
 } // namespace simple_olap

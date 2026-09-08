@@ -1,98 +1,68 @@
 #pragma once
 
-#include "../datastructs.h"
-#include "../scan_request.h"
-#include "../segment/segment.h"
-#include <algorithm>
+#include <filesystem>
 #include <memory>
 #include <unordered_map>
 
-namespace simple_olap {
-struct ScanCursor;
-class VectorBatch;
-class TableScan;
+#include "../type.h"
+#include "table/table_storage.h"
 
+namespace simple_olap {
+
+class TableSchema;
+
+// database 级物理存储管理器：管理整个数据库的物理存储。
+//
+//   database physical storage
+//             ├── table 1 (TableStorage)
+//             ├── table 2 (TableStorage)
+//             └── table 3 (TableStorage)
+//
+// 与 Catalog 平级：Catalog 管"这张表是什么"（name / schema），
+// StorageManager 管"数据在哪里、怎么读写"（tables/{id}/ 下的 segment）。
+// 两者只通过 TableId 关联，互不感知；由 Database 协调二者。
+// 将来 BufferManager / BlockManager / WAL / Checkpoint 也挂在这里。
 class StorageManager {
   public:
-    StorageManager(TableId table_id, std::filesystem::path path, const TableMeta& metadata);
+    explicit StorageManager(std::filesystem::path db_path);
 
-    // 从table的多个segment中读取一个提取数据的VectorBatch
-    // 核心步骤包括：1.
-    // 根据cursor中的segment_id选定segment，并传入offset_in_segment。2.根据返回的output的.size()，如果等于0，则cursor中的segment_id+=1，
-    // offset_in_segment=0，然后继续循环读取；如果大于0，则按照output.size()给offset_in_segment加上，退出循环。3.
-    // 根据request中where 的条件，过滤出有效的output。4.返回
-    // @param request，所有扫描需要的信息
-    // @param cursor，记录扫描到了哪个segment，哪行
-    // @param output，用来保存提取的结果
-    bool GetVectorBatch(const ScanOptions& options, ScanCursor& cursor, VectorBatch& output);
+    StorageManager(const StorageManager&) = delete;
+    StorageManager& operator=(const StorageManager&) = delete;
 
-    void Append(const DataChunk& input);
-
-    void Flush();
-
-    // 析构时把非空的活跃 segment 封存并落盘，防止进程退出丢数据
     ~StorageManager();
 
-    // ---------- 临时观察接口（调试/REPL 用，后续可能移除） ----------
+    // 获取（必要时打开）指定表的物理存储；表不存在返回 nullptr。
+    // schema 由调用方从 Catalog 取出后传入（StorageManager 不感知 Catalog）。
+    std::shared_ptr<TableStorage> GetTable(TableId table_id, const TableSchema& schema);
 
-    // 活跃 segment 当前已积累的行数（未封存、scan 不可见）
-    uint32_t active_segment_row_count() const noexcept {
-        return active_segment_ ? active_segment_->row_count() : 0;
-    }
+    // 创建新表的物理存储：tables/{table_id}/ 目录 + table.meta
+    std::shared_ptr<TableStorage> CreateTable(TableId table_id, const TableSchema& schema);
 
-    // segment 总数（已落盘 + 内存中待刷盘）
-    size_t segment_count() const noexcept {
-        return table_meta_.segment_ids.size() + sealed_segments_.size();
-    }
+    // 删除表的物理存储：落盘后删除 tables/{table_id}/ 目录
+    bool DropTable(TableId table_id);
 
-    // 表元数据（含已落盘 segment id 列表），供上层 Table 同步/持久化
-    const TableMeta& table_meta() const noexcept {
-        return table_meta_;
-    }
+    // 刷盘所有已打开表的内存 segment
+    void Flush();
 
-    // 表数据目录
+    // ---------- 观察接口 ----------
+
+    // 数据库根目录
     const std::filesystem::path& path() const noexcept {
-        return table_path_;
+        return root_path_;
     }
 
-    // 内存中待刷盘的 segment id 列表
-    std::vector<SegmentId> sealed_segment_ids() const {
-        std::vector<SegmentId> ids;
-        ids.reserve(sealed_segments_.size());
-        for (const auto& entry : sealed_segments_) {
-            ids.push_back(entry.first);
-        }
-        return ids;
+    // 当前已打开的表数量
+    size_t open_table_count() const noexcept {
+        return tables_.size();
     }
 
   private:
-    void SealActiveSegment();
+    std::filesystem::path TablesRoot() const;
 
-    void CreateActiveSegment();
+    std::filesystem::path root_path_;
 
-    // identity：表元数据；已落盘 segment 的 id 直接记录在 table_meta_.segment_ids 中
-    TableMeta table_meta_;
-
-    std::filesystem::path table_path_;
-
-    // 内存中待刷盘的 segment：id -> 填满的 SegmentBuilder
-    std::unordered_map<SegmentId, std::unique_ptr<SegmentBuilder>> sealed_segments_;
-
-    // 已落盘 segment 的只读视图缓存：id -> SegmentReader（懒加载，避免重复 mmap）
-    std::unordered_map<SegmentId, std::unique_ptr<SegmentReader>> reader_cache_;
-
-    // 获取（必要时打开）指定 id 的 SegmentReader；失败返回 nullptr
-    SegmentReader* GetSegmentReader(SegmentId id);
-
-    // append state
-    SegmentId active_segment_id_;
-
-    SegmentId next_segment_id_;
-
-    std::unique_ptr<SegmentBuilder> active_segment_;
-
-    // // 根据 segment_id 查找 SegmentBuilder（仅查内存中的 sealed 和 active）
-    // SegmentBuilder* FindSegmentById(SegmentId id) noexcept;
+    // 已打开表的物理存储缓存：table_id -> TableStorage
+    std::unordered_map<TableId, std::shared_ptr<TableStorage>> tables_;
 };
 
 } // namespace simple_olap
