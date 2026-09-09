@@ -125,4 +125,75 @@ ExecutionResult ExecutionEngine::ExecuteCommand(const PhysicalPlan& plan) {
     return result;
 }
 
+ExecutionResult ParallelExecutionEngine::ExecuteQuery(const PhysicalPlan& plan, const BatchConsumer& consumer) {
+    // ==========================================
+    // 1. PhysicalPlan -> Operator Tree
+    // ==========================================
+
+    ExecutorBuilder builder(ctx_);
+
+    BuiltExecutor executor = builder.Build(plan);
+
+    if (!executor.root) {
+        throw std::runtime_error("ExecutorBuilder returned "
+                                 "empty operator tree");
+    }
+
+    ExecutionResult result;
+
+    result.type = ExecutionResultType::QUERY;
+
+    result.schema = executor.output_schema;
+
+    // ==========================================
+    // 2. 初始化整个 Operator Tree
+    // ==========================================
+
+    executor.root->Init();
+
+    // 遍历寻找 HashAggregate_operator
+
+    // ==========================================
+    // 3. Pull execution
+    // ==========================================
+
+    VectorBatch batch;
+
+    while (true) {
+        // 每次 Next 都要求产生一个新的逻辑 batch。
+        batch.Reset();
+
+        if (!executor.root->Next(batch)) {
+            break;
+        }
+
+        const uint32_t active_rows = ActiveRowCount(batch);
+
+        // 我们之前规定：
+        //
+        // Next() == true
+        // 应该尽量保证 batch 非空。
+        //
+        // 这里保守处理一下。
+        if (active_rows == 0) {
+            continue;
+        }
+
+        result.row_count += active_rows;
+
+        // ======================================
+        // 把 batch 交给上层
+        // ======================================
+
+        if (consumer) {
+            consumer(batch, result.schema);
+        }
+
+        // callback 返回之后，
+        // 上层不能继续持有 batch.data 的裸引用。
+    }
+
+    return result;
+}
+
 } // namespace simple_olap

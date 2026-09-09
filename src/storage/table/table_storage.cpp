@@ -200,7 +200,8 @@ std::unique_ptr<TableStorage> TableStorage::Open(TableId table_id, const TableSc
 
 TableStorage::TableStorage(TableId table_id, std::filesystem::path table_path, const TableSchema& schema,
                            TableStorageMeta metadata)
-    : table_id_(table_id), schema_(&schema), metadata_(std::move(metadata)), table_path_(std::move(table_path)) {
+    : table_id_(table_id), schema_(&schema), metadata_(std::move(metadata)), table_path_(std::move(table_path)),
+      segmentallocator_(metadata_.segment_ids) {
     // 新 segment 的 id 从已落盘最大 id + 1 开始
     SegmentId next = 0;
     for (SegmentId id : metadata_.segment_ids) {
@@ -330,8 +331,13 @@ bool TableStorage::Scan(const ScanOptions& options, ScanCursor& cursor, VectorBa
 
         SegmentReader* reader = GetSegmentReader(seg_id);
         if (reader == nullptr) {
-            // 打开失败：跳过该 segment，继续尝试下一个
-            cursor.AdvanceSegment();
+            // // 打开失败：跳过该 segment，继续尝试下一个
+            // cursor.AdvanceSegment();
+            // 多线程版本
+            auto next_id = segmentallocator_.Next();
+            if (!next_id.has_value())
+                return false; // 代表没segment了
+            cursor.segment_id = *next_id;
             continue;
         }
 
@@ -342,8 +348,13 @@ bool TableStorage::Scan(const ScanOptions& options, ScanCursor& cursor, VectorBa
             const auto decision = reader->EvaluatePredicates(options.predicates);
 
             if (decision.skip_segment) {
-                // 整个 segment 都不可能有满足条件的行，直接跳过
-                cursor.AdvanceSegment();
+                // // 整个 segment 都不可能有满足条件的行，直接跳过
+                // cursor.AdvanceSegment();
+                // 多线程版本
+                auto next_id = segmentallocator_.Next();
+                if (!next_id.has_value())
+                    return false; // 代表没segment了
+                cursor.segment_id = *next_id;
                 continue;
             }
 
@@ -357,8 +368,13 @@ bool TableStorage::Scan(const ScanOptions& options, ScanCursor& cursor, VectorBa
         const bool scanned = reader->GetVectorBatch(options, cursor.offset_in_segment, output);
 
         if (!scanned || output.size == 0) {
-            // 本 segment 已读完，推进到下一个
-            cursor.AdvanceSegment();
+            // // 本 segment 已读完，推进到下一个
+            // cursor.AdvanceSegment();
+            // 多线程版本
+            auto next_id = segmentallocator_.Next();
+            if (!next_id.has_value())
+                return false; // 代表没segment了
+            cursor.segment_id = *next_id;
             continue;
         }
 

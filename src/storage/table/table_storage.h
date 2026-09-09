@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <unordered_map>
 
@@ -13,6 +14,27 @@
 
 namespace simple_olap {
 struct ScanCursor;
+
+class SegmentSource {
+  public:
+    SegmentSource() = default;
+
+    explicit SegmentSource(std::vector<SegmentId> segments) : segments_(std::move(segments)) {}
+
+    std::optional<SegmentId> Next() {
+        auto index = next_.fetch_add(1, std::memory_order_relaxed);
+
+        if (index >= segments_.size()) {
+            return std::nullopt;
+        }
+
+        return segments_[index];
+    }
+
+  private:
+    std::vector<SegmentId> segments_;
+    std::atomic<size_t> next_{0};
+};
 
 // 单表物理存储对象：对应 DuckDB 的 DataTable
 // 职责：
@@ -91,6 +113,8 @@ class TableStorage {
     TableStorageMeta metadata_;
 
     std::filesystem::path table_path_;
+
+    SegmentSource segmentallocator_;
 
     // 内存中待刷盘的 segment：id -> 填满的 SegmentBuilder
     std::unordered_map<SegmentId, std::unique_ptr<SegmentBuilder>> sealed_segments_;

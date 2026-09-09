@@ -58,4 +58,19 @@ class ExecutionEngine {
     ExecutionContext* ctx_ = nullptr;
 };
 
+class ParallelExecutionEngine {
+  public:
+    explicit ParallelExecutionEngine(ExecutionContext* ctx);
+
+    // 形成 operator 树后，将 Aggregate
+    // 作为分界线，分割为2个树，代表聚合后数据处理，和聚合前数据处理。继续细分Aggregate，将其分为两部分：上述聚合前数据处理+形成部分group表为多线程聚合前数据处理部分，将多个部分group表合并为最终Aggregate为聚合后处理部分。其中，聚合前数据处理部分采用多线程运行，聚合后数据处理采用单线程。
+    // 多线程的开启和结束都在Execute里，这也就意味着在Execute将operator 树拆分两部分，再将Aggregate拆分两部分。
+    ExecutionResult Execute(const PhysicalPlan& plan, const BatchConsumer& consumer = nullptr);
+
+  private:
+    ExecutionResult ExecuteQuery(const PhysicalPlan& plan, const BatchConsumer& consumer);
+
+    ExecutionContext* ctx_ = nullptr;
+};
+
 } // namespace simple_olap
