@@ -282,11 +282,13 @@ SegmentBuilder::SegmentBuilder(const TableSchema& schema) : row_count_(0) {
 void SegmentBuilder::Append(const DataChunk& batch) {
     const uint32_t row_count = static_cast<uint32_t>(batch.size());
 
-    // 为每一列构造 ColumnVector 视图，交给对应的 ColumnBuilder
+    // 为每一列构造 ColumnVector 视图，交给对应的 ColumnBuilder。
+    // 必须用 raw_data()：它按 slice_start_ 行数换算字节偏移。
+    // 之前用 data<uint8_t>() 时偏移单位是 1 字节而非 1 行，
+    // 跨 segment 切片（Slice）后数据会整体错位。
     for (size_t i = 0; i < column_builders_.size(); ++i) {
         ColumnVector vector;
-        // 其实可以直接转成目标类型，不过为了解决 datachunk 中 slince 方法的问题，这里还是保持 unint8 了
-        vector.data = batch.data<uint8_t>(i);
+        vector.data = batch.raw_data(i);
         vector.element_size = batch.element_size(i);
         vector.row_count = row_count;
         column_builders_[i].Append(vector);
