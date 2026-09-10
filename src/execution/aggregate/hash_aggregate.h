@@ -1,11 +1,13 @@
 #pragma once
 
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "../../parallel/thread_pool/thread_pool.h"
 #include "../expression/exec_expression.h"
 #include "../operator.h"
 
@@ -67,8 +69,18 @@ class HashAggregateOperator final : public Operator {
 
     // ---- 并行聚合支持（ParallelExecutionEngine 使用） ----
 
-    // 聚合前阶段（多线程）：消费本 worker 分到的全部输入，
-    // 形成本地部分 group 表（不 finalize、不产出 batch）。
+    // 开启并行模式：注入线程池与各 worker 的“聚合前”子树
+    // （每个 worker 一棵独立的 child 树 + 部分 group 表聚合算子）。
+    // 之后 Next() -> ConsumeAll() 会把各 worker 的 ComputePartialGroups()
+    // 提交到线程池（Submit），部分 group 表经 future 传回。
+    void SetupParallel(ThreadPool* pool, std::vector<std::unique_ptr<HashAggregateOperator>> workers) {
+        pool_ = pool;
+        workers_ = std::make_unique<std::vector<std::unique_ptr<HashAggregateOperator>>>(std::move(workers));
+        parallel_ = pool_ != nullptr && workers_ != nullptr && !workers_->empty();
+    }
+
+    // 聚合前阶段（多线程，在线程池 worker 上执行）：消费本 worker 分到的
+    // 全部输入，形成本地部分 group 表（不 finalize、不产出 batch）。
     void ComputePartialGroups();
 
     // 移出本地部分 group 表（worker -> 全局合并阶段传递）
@@ -77,6 +89,7 @@ class HashAggregateOperator final : public Operator {
     }
 
     // 聚合后阶段（单线程）：把一份部分 group 表按聚合语义合并进当前表。
+    // 合并前先 DrainFutures()：对每个 worker 任务 future.get() 收齐部分表。
     // SUM/COUNT/AVG 在中间态（sum/count）上合并，AVG 语义正确；
     // MIN/MAX 取极值。
     void MergeGroups(GroupTable other);
@@ -94,6 +107,12 @@ class HashAggregateOperator final : public Operator {
     ExecValue FinalizeAggregate(const AggCallSpec& call, const AggState& state) const;
     // 按聚合语义合并单个中间态（MergeGroups 的逐列实现）
     void MergeAggState(const AggCallSpec& call, AggState& dst, const AggState& src) const;
+    // 把一份部分 group 表合并进 groups_（不含 future 处理）
+    void MergeTableInto(GroupTable& src);
+    // 并行模式：把各 worker 的 ComputePartialGroups 提交线程池（Submit）
+    void SubmitPartialWorkers();
+    // future.get() 收齐所有 worker 的部分 group 表并合并进 groups_
+    void DrainFutures();
     void ConsumeAll();
 
     std::unique_ptr<Operator> child_;
@@ -108,6 +127,14 @@ class HashAggregateOperator final : public Operator {
 
     // group 表由外部注入（并行执行的全局合并阶段）时为 true
     bool external_groups_ = false;
+
+    // ---- 并行聚合状态 ----
+    ThreadPool* pool_ = nullptr;
+    // worker 算子容器：Submit 时逐个 move 进 task，提交完后清空
+    std::unique_ptr<std::vector<std::unique_ptr<HashAggregateOperator>>> workers_;
+    // 各 worker 部分 group 表的 future（ConsumeAll 填充，DrainFutures 消费）
+    std::vector<std::future<GroupTable>> futures_;
+    bool parallel_ = false;
 };
 
 } // namespace simple_olap

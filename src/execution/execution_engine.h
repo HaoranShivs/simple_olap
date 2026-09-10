@@ -70,6 +70,17 @@ class ParallelExecutionEngine {
   private:
     ExecutionResult ExecuteQuery(const PhysicalPlan& plan, const BatchConsumer& consumer);
 
+    // 聚合查询的并行执行：
+    //   聚合前阶段（多线程）：每个 worker 构建独立的「聚合前子树」
+    //     （Scan -> Filter -> Project -> 部分 Aggregate），从共享 segment
+    //     分配器领取互不重叠的 segment，产出本地部分 group 表。
+    //   聚合后阶段（单线程）：把所有部分 group 表按聚合语义合并成
+    //     最终 group 表，再 finalize 并通过 consumer 流式产出。
+    ExecutionResult ExecuteParallelAggregate(const PhysicalPlan& plan, const BatchConsumer& consumer);
+
+    // 计算并行度：min(线程池线程数, segment 数)；至少 1
+    size_t CalculateParallelism(size_t segment_count) const;
+
     ExecutionContext* ctx_ = nullptr;
 };
 

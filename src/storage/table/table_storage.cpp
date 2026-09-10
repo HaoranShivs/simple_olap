@@ -301,8 +301,27 @@ void TableStorage::CreateActiveSegment() {
 
 // ---------- 读路径 ----------
 
+bool TableStorage::AdvanceCursorToNextSegment(ScanCursor& cursor) {
+    // 从共享 segment 分配器领取下一个 segment。
+    // 并行扫描时多个 worker 线程通过同一个原子分配器领取，
+    // 各 worker 拿到的 segment 互不重叠。
+    const auto next_id = segmentallocator_.Next();
+    if (!next_id.has_value()) {
+        return false; // 所有 segment 都已分配完
+    }
+
+    cursor.segment_id = *next_id;
+    cursor.offset_in_segment = 0;
+    cursor.segment_decision_valid = false;
+    cursor.row_filter_mask.clear();
+    return true;
+}
+
 SegmentReader* TableStorage::GetSegmentReader(SegmentId id) {
-    // 懒加载：首次访问时 mmap 打开并缓存，后续复用
+    // 懒加载：首次访问时 mmap 打开并缓存，后续复用。
+    // 并行扫描时多个 worker 线程会并发调用，缓存读写必须在锁内完成。
+    std::lock_guard<std::mutex> lock(reader_cache_mutex_);
+
     auto it = reader_cache_.find(id);
     if (it != reader_cache_.end()) {
         return it->second.get();
@@ -326,18 +345,20 @@ SegmentReader* TableStorage::GetSegmentReader(SegmentId id) {
 bool TableStorage::Scan(const ScanOptions& options, ScanCursor& cursor, VectorBatch& output) {
     const auto& segment_ids = metadata_.segment_ids;
 
-    while (cursor.segment_id < segment_ids.size()) {
+    while (1) {
+        if (cursor.segment_id > segment_ids.size()) {
+            if (!AdvanceCursorToNextSegment(cursor)) {
+                return false; // 代表没segment了
+            }
+        }
         const SegmentId seg_id = segment_ids[cursor.segment_id];
 
         SegmentReader* reader = GetSegmentReader(seg_id);
         if (reader == nullptr) {
-            // // 打开失败：跳过该 segment，继续尝试下一个
-            // cursor.AdvanceSegment();
-            // 多线程版本
-            auto next_id = segmentallocator_.Next();
-            if (!next_id.has_value())
+            // 打开失败：跳过该 segment，继续尝试下一个
+            if (!AdvanceCursorToNextSegment(cursor)) {
                 return false; // 代表没segment了
-            cursor.segment_id = *next_id;
+            }
             continue;
         }
 
@@ -348,13 +369,10 @@ bool TableStorage::Scan(const ScanOptions& options, ScanCursor& cursor, VectorBa
             const auto decision = reader->EvaluatePredicates(options.predicates);
 
             if (decision.skip_segment) {
-                // // 整个 segment 都不可能有满足条件的行，直接跳过
-                // cursor.AdvanceSegment();
-                // 多线程版本
-                auto next_id = segmentallocator_.Next();
-                if (!next_id.has_value())
+                // 整个 segment 都不可能有满足条件的行，直接跳过
+                if (!AdvanceCursorToNextSegment(cursor)) {
                     return false; // 代表没segment了
-                cursor.segment_id = *next_id;
+                }
                 continue;
             }
 
@@ -368,13 +386,10 @@ bool TableStorage::Scan(const ScanOptions& options, ScanCursor& cursor, VectorBa
         const bool scanned = reader->GetVectorBatch(options, cursor.offset_in_segment, output);
 
         if (!scanned || output.size == 0) {
-            // // 本 segment 已读完，推进到下一个
-            // cursor.AdvanceSegment();
-            // 多线程版本
-            auto next_id = segmentallocator_.Next();
-            if (!next_id.has_value())
+            // 本 segment 已读完，推进到下一个
+            if (!AdvanceCursorToNextSegment(cursor)) {
                 return false; // 代表没segment了
-            cursor.segment_id = *next_id;
+            }
             continue;
         }
 

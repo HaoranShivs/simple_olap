@@ -21,8 +21,8 @@ constexpr uint32_t kMaxSegmentRowCount = 65536;
 //
 // segment_id 实际上是 table_meta_.segment_ids 数组中的下标。
 struct ScanCursor {
-    SegmentId segment_id = 0;       // segment_ids 数组中的 index
-    uint32_t offset_in_segment = 0; // 在当前 segment 内的行偏移
+    SegmentId segment_id = 4294967295; // segment_ids 数组中的 index， 初始值为uint32最大值。
+    uint32_t offset_in_segment = 0;    // 在当前 segment 内的行偏移
 
     // 当前 segment 的 metadata 判断结果是否有效。
     // 每个 segment 只在起点做一次 metadata 判断，之后整个 segment 复用。

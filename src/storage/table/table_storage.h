@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <unordered_map>
 
 #include "../../execution/vector/vector.h"
@@ -29,6 +30,14 @@ class SegmentSource {
         }
 
         return segments_[index];
+    }
+
+    // 重置分配进度：每次查询开始前调用。
+    // ScanCursor 的初始 segment_id 是 uint32 最大值（魔法值），
+    // 首次 Scan 时会从本分配器领取起始 segment；
+    // 不重置的话，下一次查询会从上一次的进度继续（或直接耗尽）。
+    void Reset() {
+        next_.store(0, std::memory_order_relaxed);
     }
 
   private:
@@ -73,6 +82,14 @@ class TableStorage {
 
     // ---------- 观察接口 ----------
 
+    // 重置 segment 分配器：每次查询开始前由执行引擎调用。
+    // ScanCursor 初始 segment_id 为 uint32 最大值（魔法值），
+    // 首次 Scan 时从分配器领取起始 segment；并行扫描时多个 worker
+    // 通过同一个原子分配器领取互不重叠的 segment。
+    void ResetSegmentAllocator() {
+        segmentallocator_.Reset();
+    }
+
     TableId id() const noexcept {
         return metadata_.table_id;
     }
@@ -105,6 +122,11 @@ class TableStorage {
     // 获取（必要时打开）指定 id 的 SegmentReader；失败返回 nullptr
     SegmentReader* GetSegmentReader(SegmentId id);
 
+    // 从共享 segment 分配器领取下一个 segment 并重置游标的 segment 内状态；
+    // 分配器耗尽返回 false。
+    // 并行扫描时多个 worker 通过同一个原子分配器领取互不重叠的 segment。
+    bool AdvanceCursorToNextSegment(ScanCursor& cursor);
+
     TableId table_id_;
 
     // schema 的权威来源在 Catalog；segment 编解码只需要只读访问
@@ -119,7 +141,9 @@ class TableStorage {
     // 内存中待刷盘的 segment：id -> 填满的 SegmentBuilder
     std::unordered_map<SegmentId, std::unique_ptr<SegmentBuilder>> sealed_segments_;
 
-    // 已落盘 segment 的只读视图缓存：id -> SegmentReader（懒加载，避免重复 mmap）
+    // 已落盘 segment 的只读视图缓存：id -> SegmentReader（懒加载，避免重复 mmap）。
+    // 并行扫描时多个 worker 线程会并发触发懒加载，用互斥锁保护。
+    std::mutex reader_cache_mutex_;
     std::unordered_map<SegmentId, std::unique_ptr<SegmentReader>> reader_cache_;
 
     // append state

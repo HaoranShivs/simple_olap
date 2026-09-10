@@ -11,10 +11,10 @@ namespace simple_olap {
 //   Next() == false -> EOF; caller must not read output.
 //   A returned batch is valid until the next Next() call on this operator tree.
 class Operator {
-public:
+  public:
     virtual ~Operator() = default;
     virtual void Init() = 0;
-    virtual bool Next(VectorBatch &batch) = 0;
+    virtual bool Next(VectorBatch& batch) = 0;
 };
 
 } // namespace simple_olap
