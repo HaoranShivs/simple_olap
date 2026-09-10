@@ -6,6 +6,7 @@
 #include <system_error>
 
 #include "../../execution/vector/vector.h"
+#include "../scan/parallel_scan_session.h"
 
 namespace simple_olap {
 namespace {
@@ -200,8 +201,7 @@ std::unique_ptr<TableStorage> TableStorage::Open(TableId table_id, const TableSc
 
 TableStorage::TableStorage(TableId table_id, std::filesystem::path table_path, const TableSchema& schema,
                            TableStorageMeta metadata)
-    : table_id_(table_id), schema_(&schema), metadata_(std::move(metadata)), table_path_(std::move(table_path)),
-      segmentallocator_(metadata_.segment_ids) {
+    : table_id_(table_id), schema_(&schema), metadata_(std::move(metadata)), table_path_(std::move(table_path)) {
     // 新 segment 的 id 从已落盘最大 id + 1 开始
     SegmentId next = 0;
     for (SegmentId id : metadata_.segment_ids) {
@@ -302,15 +302,18 @@ void TableStorage::CreateActiveSegment() {
 // ---------- 读路径 ----------
 
 bool TableStorage::AdvanceCursorToNextSegment(ScanCursor& cursor) {
-    // 从共享 segment 分配器领取下一个 segment。
-    // 并行扫描时多个 worker 线程通过同一个原子分配器领取，
-    // 各 worker 拿到的 segment 互不重叠。
-    const auto next_id = segmentallocator_.Next();
-    if (!next_id.has_value()) {
-        return false; // 所有 segment 都已分配完
+    // segment_id 是 metadata_.segment_ids 的下标，进度保存在游标自身。
+    // 首次调用把哨兵值提升为 0，之后逐 1 前进，耗尽返回 false。
+    if (cursor.segment_id == kInvalidSegmentId) {
+        cursor.segment_id = 0;
+    } else {
+        cursor.segment_id += 1;
     }
 
-    cursor.segment_id = *next_id;
+    if (cursor.segment_id >= metadata_.segment_ids.size()) {
+        return false; // 所有 segment 都已扫描完
+    }
+
     cursor.offset_in_segment = 0;
     cursor.segment_decision_valid = false;
     cursor.row_filter_mask.clear();
@@ -342,83 +345,105 @@ SegmentReader* TableStorage::GetSegmentReader(SegmentId id) {
 //   避免重复过滤是 Optimizer 的职责。
 //
 //    row_filter_mask 为 0 的 predicate 在本 segment 内不再逐行判断。
+bool TableStorage::ScanSegment(SegmentId segment_id, const ScanOptions& options, SegmentScanCursor& cursor,
+                               VectorBatch& output) {
+    SegmentReader* reader = GetSegmentReader(segment_id);
+    if (reader == nullptr) {
+        // 打开失败：本 segment 不可读，视为读完
+        return false;
+    }
+
+    // =====================================
+    // 第一层：每个 segment 只做一次 metadata 判断
+    // =====================================
+    if (!cursor.decision_valid) {
+        const auto decision = reader->EvaluatePredicates(options.predicates);
+
+        if (decision.skip_segment) {
+            // 整个 segment 都不可能有满足条件的行
+            return false;
+        }
+
+        cursor.row_filter_mask = decision.row_filter_mask;
+        cursor.decision_valid = true;
+    }
+
+    // =====================================
+    // 第二层：读取 physical batch
+    // =====================================
+    const bool scanned = reader->GetVectorBatch(options, cursor.offset, output);
+
+    if (!scanned || output.size == 0) {
+        // 本 segment 已读完
+        return false;
+    }
+
+    // 非常重要：
+    // cursor 必须按“扫描的物理行数”前进，而不是过滤后的有效行数。
+    cursor.offset += output.size;
+
+    // =====================================
+    // 第三层：只有 metadata 无法决定的 predicate 才 row filter
+    // =====================================
+    bool need_row_filter = false;
+    for (uint8_t flag : cursor.row_filter_mask) {
+        if (flag) {
+            need_row_filter = true;
+            break;
+        }
+    }
+
+    if (need_row_filter) {
+        ApplyRowPredicates(options, cursor.row_filter_mask, output);
+
+        if (output.size == 0) {
+            // 本批全部被过滤：调用方继续读下一批
+            return true;
+        }
+    } else {
+        // 所有 pushed predicate 对该 segment 都 ALL_MATCH
+        output.sel_vector.clear();
+    }
+
+    return true;
+}
+
 bool TableStorage::Scan(const ScanOptions& options, ScanCursor& cursor, VectorBatch& output) {
     const auto& segment_ids = metadata_.segment_ids;
 
     while (1) {
-        if (cursor.segment_id > segment_ids.size()) {
+        if (cursor.segment_id == kInvalidSegmentId) {
             if (!AdvanceCursorToNextSegment(cursor)) {
-                return false; // 代表没segment了
+                return false; // 没有 segment
             }
         }
         const SegmentId seg_id = segment_ids[cursor.segment_id];
 
-        SegmentReader* reader = GetSegmentReader(seg_id);
-        if (reader == nullptr) {
-            // 打开失败：跳过该 segment，继续尝试下一个
+        // 单 segment 扫描：metadata pruning / batch 读取 / row filtering
+        // 与并行路径共用同一份逻辑（ScanSegment）
+        SegmentScanCursor segment_cursor;
+        segment_cursor.offset = cursor.offset_in_segment;
+        segment_cursor.decision_valid = cursor.segment_decision_valid;
+        segment_cursor.row_filter_mask = cursor.row_filter_mask;
+
+        const bool got = ScanSegment(seg_id, options, segment_cursor, output);
+
+        // 把 segment 内游标状态同步回跨 segment 游标
+        cursor.offset_in_segment = segment_cursor.offset;
+        cursor.segment_decision_valid = segment_cursor.decision_valid;
+        cursor.row_filter_mask = std::move(segment_cursor.row_filter_mask);
+
+        if (!got) {
+            // 本 segment 读完（或被 pruning 跳过 / 打开失败）：推进到下一个
             if (!AdvanceCursorToNextSegment(cursor)) {
                 return false; // 代表没segment了
             }
             continue;
         }
 
-        // =====================================
-        // 第一层：每个 segment 只做一次 metadata 判断
-        // =====================================
-        if (!cursor.segment_decision_valid) {
-            const auto decision = reader->EvaluatePredicates(options.predicates);
-
-            if (decision.skip_segment) {
-                // 整个 segment 都不可能有满足条件的行，直接跳过
-                if (!AdvanceCursorToNextSegment(cursor)) {
-                    return false; // 代表没segment了
-                }
-                continue;
-            }
-
-            cursor.row_filter_mask = decision.row_filter_mask;
-            cursor.segment_decision_valid = true;
-        }
-
-        // =====================================
-        // 第二层：读取 physical batch
-        // =====================================
-        const bool scanned = reader->GetVectorBatch(options, cursor.offset_in_segment, output);
-
-        if (!scanned || output.size == 0) {
-            // 本 segment 已读完，推进到下一个
-            if (!AdvanceCursorToNextSegment(cursor)) {
-                return false; // 代表没segment了
-            }
+        if (output.size == 0) {
+            // 本批全部被行过滤：继续读下一批
             continue;
-        }
-
-        // 非常重要：
-        // cursor 必须按“扫描的物理行数”前进，而不是过滤后的有效行数。
-        const uint32_t scanned_rows = output.size;
-        cursor.offset_in_segment += scanned_rows;
-
-        // =====================================
-        // 第三层：只有 metadata 无法决定的 predicate 才 row filter
-        // =====================================
-        bool need_row_filter = false;
-        for (uint8_t flag : cursor.row_filter_mask) {
-            if (flag) {
-                need_row_filter = true;
-                break;
-            }
-        }
-
-        if (need_row_filter) {
-            ApplyRowPredicates(options, cursor.row_filter_mask, output);
-
-            if (output.size == 0) {
-                // 本批全部被过滤：继续读下一批
-                continue;
-            }
-        } else {
-            // 所有 pushed predicate 对该 segment 都 ALL_MATCH
-            output.sel_vector.clear();
         }
 
         return true;
@@ -427,6 +452,14 @@ bool TableStorage::Scan(const ScanOptions& options, ScanCursor& cursor, VectorBa
     // 所有 segment 都已读完
     output.Reset();
     return false;
+}
+
+// ---------- 并行扫描 ----------
+
+std::shared_ptr<BatchStream> TableStorage::CreateParallelScan(const ScanOptions& options, size_t scan_threads,
+                                                              size_t queue_capacity) {
+    // 已落盘 segment 的 id 列表是本次并行扫描的完整输入
+    return std::make_shared<ParallelScanSession>(this, metadata_.segment_ids, options, scan_threads, queue_capacity);
 }
 
 } // namespace simple_olap

@@ -1,5 +1,6 @@
 build/
 database/
+benchmark/bench_data/
 my_planner.tar
 *:Zone.Identifier
 .clang-format

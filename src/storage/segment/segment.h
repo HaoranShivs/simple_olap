@@ -16,15 +16,9 @@ enum class SegmentMatch : uint8_t { SKIP, ALL_MATCH, NEED_FILTER };
 struct SegmentFilterDecision {
     bool skip_segment = false;
 
-    // 与 ScanOptions::predicates
-    // 一一对应。
-    //
-    // 1:
-    //   该 predicate 这个 segment
-    //   需要逐行精确执行。
-    //
-    // 0:
-    //   metadata 已证明全部满足。
+    // 与 ScanOptions::predicates 一一对应：
+    //   1 -> 该 predicate 在本 segment 需要逐行精确执行（NEED_FILTER）
+    //   0 -> metadata 已证明整个 segment 全部满足（ALL_MATCH）
     std::vector<uint8_t> row_filter_mask;
 };
 

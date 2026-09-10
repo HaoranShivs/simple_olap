@@ -4,7 +4,10 @@
 #include <cstring>
 
 namespace simple_olap {
-// ============ ColumnData 实现 ============
+
+// ==========================================
+// ColumnData 实现
+// ==========================================
 
 bool ColumnData::is_view() const {
     return is_view_;
@@ -57,7 +60,9 @@ void ColumnData::Reset() {
     is_view_ = false;
 }
 
-// ============ VectorBatch 实现 ============
+// ==========================================
+// VectorBatch 实现
+// ==========================================
 
 VectorBatch::VectorBatch(bool is_view) : is_view_(is_view) {}
 

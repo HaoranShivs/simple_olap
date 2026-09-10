@@ -7,6 +7,8 @@ namespace simple_olap {
 
 namespace {
 
+// 已废弃：旧版单 predicate 解析实现，被下方 ExtractSimplePredicate 取代。
+// 确认无引用后可整体删除。
 // bool ExtractSimplePredicate(const PlanExpr& expr, SimplePredicate& out) {
 //     if (expr.GetType() != PlanExpr::Type::BINARY_OP)
 //         return false;
@@ -63,10 +65,7 @@ bool ExtractSimplePredicate(const PlanExpr& expr, SimplePredicate& out) {
 
     const auto& literal = static_cast<const PlanLiteral&>(binary.GetRight());
 
-    // 非数值条件暂时绝对不能下推。
-    //
-    // 因为当前 Storage row filter
-    // 只能准确处理数值。
+    // 非数值列不下推：当前存储层 row filter 只能正确处理数值比较。
     if (!IsNumericType(column.GetReturnType())) {
         return false;
     }
@@ -115,6 +114,8 @@ PlanExprPtr BuildConjunction(std::vector<PlanExprPtr> exprs) {
     return result;
 }
 
+// 已废弃：旧版单 predicate 下推实现，被下方多 predicate 版本取代。
+// 确认无引用后可整体删除。
 // bool PushPredicate(LogicalPlanPtr& node) {
 //     if (!node)
 //         return false;
@@ -166,12 +167,12 @@ bool PushPredicate(LogicalPlanPtr& node) {
 
         auto* scan = static_cast<LogicalScan*>(filter->MutableChild().get());
 
-        // 1. WHERE 按 AND 拆开。
+        // 1. 把 WHERE 按 AND 拆成合取子式。
         std::vector<PlanExprPtr> conjuncts;
 
         FlattenConjuncts(filter->GetPredicate(), conjuncts);
 
-        // 2. 分成 pushed / residual。
+        // 2. 分成可下推的 pushed 与留在 Filter 的 residual。
         std::vector<SimplePredicate> pushed;
 
         std::vector<PlanExprPtr> residual;
@@ -186,28 +187,24 @@ bool PushPredicate(LogicalPlanPtr& node) {
             }
         }
 
-        // 一个都推不了。
+        // 一个也推不了：保持原样。
         if (pushed.empty()) {
             return changed;
         }
 
-        // 3. pushed 从 Filter 中真正移走。
+        // 3. 把 pushed 挂到 Scan 上。
         for (auto& predicate : pushed) {
             scan->AddPushedPredicate(std::move(predicate));
         }
 
-        // 4. 没 residual:
-        //
-        // Filter 完全消失。
+        // 4. 没有 residual：Filter 整体消失。
         if (residual.empty()) {
             node = std::move(filter->MutableChild());
 
             return true;
         }
 
-        // 5. 有 residual:
-        //
-        // Filter 只保存没下推的部分。
+        // 5. 有 residual：Filter 只保留未下推的部分。
         filter->SetPredicate(BuildConjunction(std::move(residual)));
 
         return true;
@@ -254,6 +251,7 @@ void CollectRequiredColumns(const LogicalPlan& node, std::vector<uint32_t>& colu
     }
     case LogicalPlan::Type::SCAN: {
         const auto& scan = static_cast<const LogicalScan&>(node);
+        // 已废弃：旧版单 predicate 取列方式，对应接口已移除。
         // if (scan.GetPushedPredicate())
         //     columns.push_back(scan.GetPushedPredicate()->column_index);
         for (const auto& predicate : scan.GetPushedPredicates()) {

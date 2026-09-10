@@ -12,28 +12,29 @@
 
 namespace simple_olap {
 
+// 结果集中的一列：列名与 SQL 类型。
 struct ResultColumn {
     std::string name;
     DataType type;
 };
 
+// 单条 SQL 的执行结果：SELECT 存放数据块，INSERT / DDL 只记录影响行数。
 class QueryResult {
   public:
     enum class Type { SELECT, INSERT, CREATE_TABLE };
 
-    Type type;
+    Type type; // 结果类型
 
-    std::vector<ResultColumn> columns;
+    std::vector<ResultColumn> columns; // 结果列元数据
 
-    // SELECT result
+    // SELECT 结果：按 batch 分块存放。
     std::vector<VectorBatch> chunks;
 
-    // INSERT / DDL
+    // INSERT / DDL 的受影响行数。
     uint64_t affected_rows = 0;
 
-    // 追加一个 batch：深拷贝各列数据（batch 可能是视图模式，
-    // 指向 mmap 区或算子内部缓冲，回调返回后即失效，必须物化）。
-    // 同时累加 affected_rows 作为总行数。
+    // 追加一个 batch：深拷贝各列数据（batch 可能是视图，回调返回后即失效，
+    // 必须物化），同时累加 affected_rows 作为总行数。
     void Append(const VectorBatch& batch) {
         VectorBatch copy(/*is_view=*/false);
 
@@ -82,7 +83,7 @@ class QueryResult {
 
                 ResultColumn column;
 
-                // 类型必须从 Binder 获取
+                // 类型必须从 Binder 获取（AST 侧无类型推导结果）。
                 column.type = bound_item.expr->return_type;
 
                 // 名称优先使用 AS alias（SELECT * 展开时 Binder 已填列名）
@@ -91,7 +92,7 @@ class QueryResult {
                 } else if (is_star) {
                     throw std::logic_error("SELECT * expansion missing column alias");
                 } else {
-                    // 没 alias 则使用原始 SQL 表达式
+                    // 无 alias 时回退到原始 SQL 表达式文本。
                     column.name = parsed.select_list[i].expr->ToString();
                 }
 

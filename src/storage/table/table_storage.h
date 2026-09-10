@@ -9,43 +9,17 @@
 #include "../../type.h"
 #include "../datachunk.h"
 #include "../datastructs.h"
+#include "../scan/batch_stream.h"
 #include "../scan_request.h"
 #include "../segment/segment.h"
 #include "table_storage_meta.h"
 
 namespace simple_olap {
+// 前置声明：扫描游标（定义见 ../datastructs.h）
 struct ScanCursor;
+struct SegmentScanCursor;
 
-class SegmentSource {
-  public:
-    SegmentSource() = default;
-
-    explicit SegmentSource(std::vector<SegmentId> segments) : segments_(std::move(segments)) {}
-
-    std::optional<SegmentId> Next() {
-        auto index = next_.fetch_add(1, std::memory_order_relaxed);
-
-        if (index >= segments_.size()) {
-            return std::nullopt;
-        }
-
-        return segments_[index];
-    }
-
-    // 重置分配进度：每次查询开始前调用。
-    // ScanCursor 的初始 segment_id 是 uint32 最大值（魔法值），
-    // 首次 Scan 时会从本分配器领取起始 segment；
-    // 不重置的话，下一次查询会从上一次的进度继续（或直接耗尽）。
-    void Reset() {
-        next_.store(0, std::memory_order_relaxed);
-    }
-
-  private:
-    std::vector<SegmentId> segments_;
-    std::atomic<size_t> next_{0};
-};
-
-// 单表物理存储对象：对应 DuckDB 的 DataTable
+// 单表物理存储对象
 // 职责：
 //   - 一张表的 segment 组成（active / sealed / 已落盘）
 //   - Append / Scan / Flush
@@ -80,15 +54,19 @@ class TableStorage {
     // 跨 segment 扫描：由 cursor 记录推进位置，输出一个 VectorBatch
     bool Scan(const ScanOptions& options, ScanCursor& cursor, VectorBatch& output);
 
-    // ---------- 观察接口 ----------
+    // 单 segment 扫描：只读取指定 segment 内 [cursor.offset, ...) 的数据，
+    // 绝不推进到其他 segment。metadata pruning / batch 读取 / row filtering
+    // 与串行 Scan() 共用完全相同的逻辑。
+    // 返回 false 表示本 segment 已读完（或被 metadata pruning 跳过）。
+    bool ScanSegment(SegmentId segment_id, const ScanOptions& options, SegmentScanCursor& cursor, VectorBatch& output);
 
-    // 重置 segment 分配器：每次查询开始前由执行引擎调用。
-    // ScanCursor 初始 segment_id 为 uint32 最大值（魔法值），
-    // 首次 Scan 时从分配器领取起始 segment；并行扫描时多个 worker
-    // 通过同一个原子分配器领取互不重叠的 segment。
-    void ResetSegmentAllocator() {
-        segmentallocator_.Reset();
-    }
+    // 并行扫描入口：创建 ParallelScanSession（BatchStream）。
+    // 调用方 Start() 后通过 BatchStream::Next() 拉取批次；
+    // scan 线程在 storage 内部由 session 管理（atomic next_segment 分配）。
+    std::shared_ptr<BatchStream> CreateParallelScan(const ScanOptions& options, size_t scan_threads,
+                                                    size_t queue_capacity);
+
+    // ---------- 观察接口 ----------
 
     TableId id() const noexcept {
         return metadata_.table_id;
@@ -122,9 +100,8 @@ class TableStorage {
     // 获取（必要时打开）指定 id 的 SegmentReader；失败返回 nullptr
     SegmentReader* GetSegmentReader(SegmentId id);
 
-    // 从共享 segment 分配器领取下一个 segment 并重置游标的 segment 内状态；
-    // 分配器耗尽返回 false。
-    // 并行扫描时多个 worker 通过同一个原子分配器领取互不重叠的 segment。
+    // 把游标推进到下一个 segment（进度保存在游标内）。
+    // 首次调用从 index 0 开始，耗尽返回 false。
     bool AdvanceCursorToNextSegment(ScanCursor& cursor);
 
     TableId table_id_;
@@ -135,8 +112,6 @@ class TableStorage {
     TableStorageMeta metadata_;
 
     std::filesystem::path table_path_;
-
-    SegmentSource segmentallocator_;
 
     // 内存中待刷盘的 segment：id -> 填满的 SegmentBuilder
     std::unordered_map<SegmentId, std::unique_ptr<SegmentBuilder>> sealed_segments_;

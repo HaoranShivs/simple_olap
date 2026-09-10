@@ -16,6 +16,8 @@ namespace simple_olap {
 //   schema 留空（旧库的 table.meta 是已废弃的 TableMeta 格式，不再回读）。
 constexpr uint32_t kCatalogMetaMagic = 0x324C4F43; // "COL2" 小端
 
+// ---------- 持久化 ----------
+
 bool Catalog::Create(const std::filesystem::path& path) {
     // 1. 创建 catalog 根目录（含父目录）
     std::error_code ec;
@@ -121,15 +123,7 @@ bool Catalog::SaveMeta() const {
     return file.good();
 }
 
-TableId Catalog::NextTableId() const {
-    TableId next = 0;
-    for (const auto& kv : tables_) {
-        if (kv.first >= next) {
-            next = kv.first + 1;
-        }
-    }
-    return next;
-}
+// ---------- 表变更 ----------
 
 bool Catalog::CreateTable(const CreateTableStatement& stmt) {
     const std::string& table_name = stmt.table_name;
@@ -192,6 +186,8 @@ bool Catalog::DropTable(std::string_view table_name) {
     return true;
 }
 
+// ---------- 查询 ----------
+
 std::optional<TableId> Catalog::FindTable(std::string_view table_name) const {
     const auto it = name_index_.find(std::string(table_name));
     if (it == name_index_.end()) {
@@ -214,6 +210,18 @@ const TableCatalogEntry* Catalog::GetTable(TableId table_id) const {
         return nullptr;
     }
     return &it->second;
+}
+
+// ---------- 内部辅助 ----------
+
+TableId Catalog::NextTableId() const {
+    TableId next = 0;
+    for (const auto& kv : tables_) {
+        if (kv.first >= next) {
+            next = kv.first + 1;
+        }
+    }
+    return next;
 }
 
 } // namespace simple_olap

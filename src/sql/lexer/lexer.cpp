@@ -3,6 +3,10 @@
 #include <cctype>
 
 namespace simple_olap {
+
+// ==========================================
+// 公共接口
+// ==========================================
 Lexer::Lexer() = default;
 
 std::vector<Token> Lexer::Lex(std::string_view sql) {
@@ -11,6 +15,9 @@ std::vector<Token> Lexer::Lex(std::string_view sql) {
     return Tokenize();
 }
 
+// ==========================================
+// Token 扫描
+// ==========================================
 Token Lexer::NextToken() {
     SkipWhitespace();
 
@@ -57,7 +64,7 @@ Token Lexer::NextToken() {
         token = Token{TokenType::PLUS, "+", curridx_};
         break;
     case '-':
-        // 可能是注释 "--"
+        // 行注释 "--"：当前实现不跳过整行内容，仅继续取下一个 Token。
         if (curridx_ + 1 < sql_.size() && sql_[curridx_ + 1] == '-') {
             SkipWhitespace();
             return NextToken();
@@ -90,7 +97,7 @@ Token Lexer::NextToken() {
         }
         break;
     default:
-        // 未知字符，跳过
+        // 未知字符：跳过并继续。
         curridx_++;
         return NextToken();
     }
@@ -111,6 +118,9 @@ std::vector<Token> Lexer::Tokenize() {
     return tokens;
 }
 
+// ==========================================
+// 字符读取辅助
+// ==========================================
 char Lexer::Peek() const {
     if (curridx_ >= sql_.size()) {
         return '\0';
@@ -131,6 +141,9 @@ void Lexer::SkipWhitespace() {
     }
 }
 
+// ==========================================
+// 各类 Token 读取
+// ==========================================
 Token Lexer::ReadIdentifierOrKeyword() {
     uint32_t start = curridx_;
     while (curridx_ < sql_.size() &&
@@ -183,8 +196,8 @@ Token Lexer::ReadNumber() {
     }
 
     std::string text(sql_.substr(start, curridx_ - start));
-    // 整数与浮点区分 token 类型：整数 -> INTEGER，浮点 -> FLOAT
-    // （否则 INSERT INTO t(a INT) VALUES (1) 会因字面量被当成 DOUBLE 而类型不匹配）
+    // 区分整数与浮点：整数 -> INTEGER，浮点 -> FLOAT。
+    // 若不区分，INSERT INTO t(a INT) VALUES (1) 会因字面量被当成 DOUBLE 而类型不匹配。
     if (!is_float) {
         return Token{TokenType::INTEGER, text, start};
     }

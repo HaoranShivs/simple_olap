@@ -55,27 +55,17 @@ BuiltExecutor ExecutorBuilder::Build(const PhysicalPlan& plan) const {
     if (ctx_ == nullptr || ctx_->catalog == nullptr) {
         throw std::runtime_error("ExecutorBuilder: missing execution context/catalog");
     }
-    return BuildNode(plan);
+    return BuildNode(plan, ExecutorBuildOptions{});
 }
 
-BuiltExecutor ExecutorBuilder::BuildNode(const PhysicalPlan& plan) const {
-    switch (plan.GetType()) {
-    case PhysicalPlan::Type::SEQ_SCAN:
-        return BuildSeqScan(static_cast<const PhysicalSeqScan&>(plan));
-    case PhysicalPlan::Type::FILTER:
-        return BuildFilter(static_cast<const PhysicalFilter&>(plan));
-    case PhysicalPlan::Type::PROJECT:
-        return BuildProject(static_cast<const PhysicalProject&>(plan));
-    case PhysicalPlan::Type::HASH_AGGREGATE:
-        return BuildHashAggregate(static_cast<const PhysicalHashAggregate&>(plan));
-    case PhysicalPlan::Type::INSERT:
-    case PhysicalPlan::Type::CREATE_TABLE:
-        throw std::runtime_error("ExecutorBuilder: command plan is not a streaming operator tree");
+BuiltExecutor ExecutorBuilder::Build(const PhysicalPlan& plan, const ExecutorBuildOptions& options) const {
+    if (ctx_ == nullptr || ctx_->catalog == nullptr) {
+        throw std::runtime_error("ExecutorBuilder: missing execution context/catalog");
     }
-    throw std::runtime_error("ExecutorBuilder: unsupported physical plan node");
+    return BuildNode(plan, options);
 }
 
-BuiltExecutor ExecutorBuilder::BuildSeqScan(const PhysicalSeqScan& plan) const {
+BuiltScanSpec ExecutorBuilder::BuildScanSpec(const PhysicalSeqScan& plan) const {
     // bind 阶段已结束：这里只从 Catalog 读 schema（纯内存），物理扫描
     // 由 SeqScanOperator 通过 StorageManager 完成
     const TableCatalogEntry* entry = ctx_->catalog->GetTable(plan.GetTableOid());
@@ -139,12 +129,97 @@ BuiltExecutor ExecutorBuilder::BuildSeqScan(const PhysicalSeqScan& plan) const {
         output_schema.push_back(std::move(slot));
     }
 
-    return BuiltExecutor{std::make_unique<SeqScanOperator>(plan.GetTableOid(), std::move(options), ctx_),
-                         std::move(output_schema)};
+    BuiltScanSpec spec;
+    spec.table_id = plan.GetTableOid();
+    spec.options = std::move(options);
+    spec.output_schema = std::move(output_schema);
+    return spec;
 }
 
-BuiltExecutor ExecutorBuilder::BuildFilter(const PhysicalFilter& plan) const {
-    BuiltExecutor child = BuildNode(plan.GetChild());
+BuiltAggregateSpec ExecutorBuilder::BuildAggregateSpec(const PhysicalHashAggregate& plan,
+                                                       const ExecSchema& child_schema) const {
+    BuiltAggregateSpec spec;
+
+    spec.group_exprs.reserve(plan.GetGroupBy().size());
+    for (const auto& group : plan.GetGroupBy()) {
+        spec.group_exprs.push_back(CompileExecExpr(*group, child_schema));
+    }
+
+    spec.outputs.reserve(plan.GetOutputs().size());
+    spec.output_schema.reserve(plan.GetOutputs().size());
+
+    for (const auto& output : plan.GetOutputs()) {
+        AggregateOutputSpec output_spec;
+        output_spec.type = output.expr->GetReturnType();
+        output_spec.name = output.alias;
+
+        ExecSlot schema_slot;
+        schema_slot.type = output.expr->GetReturnType();
+        schema_slot.name = output.alias;
+
+        if (output.expr->GetType() == PlanExpr::Type::AGG_FUNC) {
+            const auto& agg = static_cast<const PlanAggExpr&>(*output.expr);
+            AggCallSpec call;
+            call.type = agg.GetAggType();
+            call.result_type = agg.GetReturnType();
+            if (agg.GetArg() != nullptr) {
+                call.arg = CompileExecExpr(*agg.GetArg(), child_schema);
+            }
+
+            output_spec.kind = AggregateOutputSpec::Kind::AGGREGATE;
+            output_spec.index = static_cast<uint32_t>(spec.agg_calls.size());
+            spec.agg_calls.push_back(std::move(call));
+        } else {
+            auto group_idx = FindGroupIndex(*output.expr, plan.GetGroupBy());
+            if (!group_idx.has_value()) {
+                throw std::runtime_error("ExecutorBuilder: non-aggregate output must match a GROUP BY expression");
+            }
+            output_spec.kind = AggregateOutputSpec::Kind::GROUP_KEY;
+            output_spec.index = *group_idx;
+            schema_slot.source = DirectBinding(*output.expr);
+        }
+
+        spec.outputs.push_back(std::move(output_spec));
+        spec.output_schema.push_back(std::move(schema_slot));
+    }
+
+    return spec;
+}
+
+BuiltExecutor ExecutorBuilder::BuildNode(const PhysicalPlan& plan, const ExecutorBuildOptions& options) const {
+    switch (plan.GetType()) {
+    case PhysicalPlan::Type::SEQ_SCAN:
+        return BuildSeqScan(static_cast<const PhysicalSeqScan&>(plan), options);
+    case PhysicalPlan::Type::FILTER:
+        return BuildFilter(static_cast<const PhysicalFilter&>(plan), options);
+    case PhysicalPlan::Type::PROJECT:
+        return BuildProject(static_cast<const PhysicalProject&>(plan), options);
+    case PhysicalPlan::Type::HASH_AGGREGATE:
+        return BuildHashAggregate(static_cast<const PhysicalHashAggregate&>(plan), options);
+    case PhysicalPlan::Type::INSERT:
+    case PhysicalPlan::Type::CREATE_TABLE:
+        throw std::runtime_error("ExecutorBuilder: command plan is not a streaming operator tree");
+    }
+    throw std::runtime_error("ExecutorBuilder: unsupported physical plan node");
+}
+
+BuiltExecutor ExecutorBuilder::BuildSeqScan(const PhysicalSeqScan& plan, const ExecutorBuildOptions& options) const {
+    BuiltScanSpec spec = BuildScanSpec(plan);
+
+    if (options.scan_stream != nullptr) {
+        // 并行模式：SeqScan 消费共享的 BatchStream
+        return BuiltExecutor{
+            std::make_unique<SeqScanOperator>(spec.table_id, std::move(spec.options), options.scan_stream, ctx_),
+            std::move(spec.output_schema)};
+    }
+
+    // 串行模式：直接访问 Storage
+    return BuiltExecutor{std::make_unique<SeqScanOperator>(spec.table_id, std::move(spec.options), ctx_),
+                         std::move(spec.output_schema)};
+}
+
+BuiltExecutor ExecutorBuilder::BuildFilter(const PhysicalFilter& plan, const ExecutorBuildOptions& options) const {
+    BuiltExecutor child = BuildNode(plan.GetChild(), options);
     ExecExprPtr predicate = CompileExecExpr(plan.GetPredicate(), child.output_schema);
 
     BuiltExecutor result;
@@ -153,8 +228,8 @@ BuiltExecutor ExecutorBuilder::BuildFilter(const PhysicalFilter& plan) const {
     return result;
 }
 
-BuiltExecutor ExecutorBuilder::BuildProject(const PhysicalProject& plan) const {
-    BuiltExecutor child = BuildNode(plan.GetChild());
+BuiltExecutor ExecutorBuilder::BuildProject(const PhysicalProject& plan, const ExecutorBuildOptions& options) const {
+    BuiltExecutor child = BuildNode(plan.GetChild(), options);
 
     std::vector<ExecExprPtr> expressions;
     ExecSchema output_schema;
@@ -175,59 +250,14 @@ BuiltExecutor ExecutorBuilder::BuildProject(const PhysicalProject& plan) const {
                          std::move(output_schema)};
 }
 
-BuiltExecutor ExecutorBuilder::BuildHashAggregate(const PhysicalHashAggregate& plan) const {
-    BuiltExecutor child = BuildNode(plan.GetChild());
+BuiltExecutor ExecutorBuilder::BuildHashAggregate(const PhysicalHashAggregate& plan,
+                                                  const ExecutorBuildOptions& options) const {
+    BuiltExecutor child = BuildNode(plan.GetChild(), options);
+    BuiltAggregateSpec spec = BuildAggregateSpec(plan, child.output_schema);
 
-    std::vector<ExecExprPtr> group_exprs;
-    group_exprs.reserve(plan.GetGroupBy().size());
-    for (const auto& group : plan.GetGroupBy()) {
-        group_exprs.push_back(CompileExecExpr(*group, child.output_schema));
-    }
-
-    std::vector<AggCallSpec> agg_calls;
-    std::vector<AggregateOutputSpec> outputs;
-    ExecSchema output_schema;
-    outputs.reserve(plan.GetOutputs().size());
-    output_schema.reserve(plan.GetOutputs().size());
-
-    for (const auto& output : plan.GetOutputs()) {
-        AggregateOutputSpec output_spec;
-        output_spec.type = output.expr->GetReturnType();
-        output_spec.name = output.alias;
-
-        ExecSlot schema_slot;
-        schema_slot.type = output.expr->GetReturnType();
-        schema_slot.name = output.alias;
-
-        if (output.expr->GetType() == PlanExpr::Type::AGG_FUNC) {
-            const auto& agg = static_cast<const PlanAggExpr&>(*output.expr);
-            AggCallSpec call;
-            call.type = agg.GetAggType();
-            call.result_type = agg.GetReturnType();
-            if (agg.GetArg() != nullptr) {
-                call.arg = CompileExecExpr(*agg.GetArg(), child.output_schema);
-            }
-
-            output_spec.kind = AggregateOutputSpec::Kind::AGGREGATE;
-            output_spec.index = static_cast<uint32_t>(agg_calls.size());
-            agg_calls.push_back(std::move(call));
-        } else {
-            auto group_idx = FindGroupIndex(*output.expr, plan.GetGroupBy());
-            if (!group_idx.has_value()) {
-                throw std::runtime_error("ExecutorBuilder: non-aggregate output must match a GROUP BY expression");
-            }
-            output_spec.kind = AggregateOutputSpec::Kind::GROUP_KEY;
-            output_spec.index = *group_idx;
-            schema_slot.source = DirectBinding(*output.expr);
-        }
-
-        outputs.push_back(std::move(output_spec));
-        output_schema.push_back(std::move(schema_slot));
-    }
-
-    return BuiltExecutor{std::make_unique<HashAggregateOperator>(std::move(child.root), std::move(group_exprs),
-                                                                 std::move(agg_calls), std::move(outputs)),
-                         std::move(output_schema)};
+    return BuiltExecutor{std::make_unique<HashAggregateOperator>(std::move(child.root), std::move(spec.group_exprs),
+                                                                 std::move(spec.agg_calls), std::move(spec.outputs)),
+                         std::move(spec.output_schema)};
 }
 
 } // namespace simple_olap

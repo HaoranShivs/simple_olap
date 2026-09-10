@@ -4,6 +4,8 @@
 
 namespace simple_olap {
 
+// ---------- 生命周期 ----------
+
 Database::Database(std::filesystem::path path, DatabaseConfig config)
     : path_(std::move(path)), config_(std::move(config)), catalog_(), storage_manager_(path_),
       thread_pool_(config_.thread_count) {
@@ -12,15 +14,7 @@ Database::Database(std::filesystem::path path, DatabaseConfig config)
 }
 
 Database::~Database() {
-    // StorageManager 析构时会兜底落盘所有已打开表的内存 segment
-}
-
-void Database::Initialize() {
-    if (!catalog_.LoadMeta(path_)) {
-        if (!catalog_.Create(path_)) {
-            throw std::runtime_error("Failed to create database: " + path_.string());
-        }
-    }
+    // StorageManager 析构时会兜底落盘所有已打开表的内存 segment。
 }
 
 // ---------- DDL 协调（Catalog 与 StorageManager 的唯一交汇处） ----------
@@ -61,6 +55,16 @@ bool Database::DropTable(std::string_view table_name) {
     }
 
     return true;
+}
+
+// ---------- 内部辅助 ----------
+
+void Database::Initialize() {
+    if (!catalog_.LoadMeta(path_)) {
+        if (!catalog_.Create(path_)) {
+            throw std::runtime_error("Failed to create database: " + path_.string());
+        }
+    }
 }
 
 } // namespace simple_olap

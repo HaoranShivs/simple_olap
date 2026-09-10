@@ -11,28 +11,24 @@
 
 using namespace simple_olap;
 
-static int passed = 0;
-static int failed = 0;
+static int passed = 0; // 通过的用例数
+static int failed = 0; // 失败的用例数
 
-#define CHECK(cond, msg)                                  \
-    do                                                    \
-    {                                                     \
-        if (cond)                                         \
-        {                                                 \
-            passed++;                                     \
-            std::cout << "[PASS] " << msg << std::endl;   \
-        }                                                 \
-        else                                              \
-        {                                                 \
-            failed++;                                     \
-            std::cout << "[FAIL] " << msg << std::endl;   \
-        }                                                 \
+// 断言宏：累计通过/失败计数，并打印用例结论。
+#define CHECK(cond, msg)                                                                                               \
+    do {                                                                                                               \
+        if (cond) {                                                                                                    \
+            passed++;                                                                                                  \
+            std::cout << "[PASS] " << msg << std::endl;                                                                \
+        } else {                                                                                                       \
+            failed++;                                                                                                  \
+            std::cout << "[FAIL] " << msg << std::endl;                                                                \
+        }                                                                                                              \
     } while (0)
 
 // ---------- Lexer 测试 ----------
 
-static void TestLexerBasic()
-{
+static void TestLexerBasic() {
     Lexer lexer("SELECT a, b FROM t;");
     auto tokens = lexer.Tokenize();
 
@@ -46,8 +42,7 @@ static void TestLexerBasic()
     CHECK(tokens[8].type == TokenType::END, "Last token is END");
 }
 
-static void TestLexerNumbersAndStrings()
-{
+static void TestLexerNumbersAndStrings() {
     Lexer lexer("WHERE age > 18 AND name = 'tom'");
     auto tokens = lexer.Tokenize();
 
@@ -55,8 +50,7 @@ static void TestLexerNumbersAndStrings()
     CHECK(tokens[7].type == TokenType::STRING && tokens[7].text == "tom", "String literal 'tom'");
 }
 
-static void TestLexerOperators()
-{
+static void TestLexerOperators() {
     Lexer lexer("a <= 1 AND b >= 2 AND c != 3");
     auto tokens = lexer.Tokenize();
 
@@ -67,8 +61,7 @@ static void TestLexerOperators()
 
 // ---------- Parser 测试 ----------
 
-static void TestParseSimpleSelect()
-{
+static void TestParseSimpleSelect() {
     Lexer lexer("SELECT a, b FROM t;");
     Parser parser(lexer.Tokenize());
     auto stmt = parser.ParseStatement();
@@ -76,57 +69,51 @@ static void TestParseSimpleSelect()
     CHECK(stmt != nullptr, "Parse: statement is not null");
     CHECK(stmt->GetType() == Statement::Type::SELECT, "Parse: statement type is SELECT");
 
-    auto *select = static_cast<SelectStatement *>(stmt.get());
+    auto* select = static_cast<SelectStatement*>(stmt.get());
     CHECK(select->table_name == "t", "Parse: table name is 't'");
     CHECK(select->select_list.size() == 2, "Parse: select list has 2 items");
 }
 
-static void TestParseWhereAndGroupBy()
-{
+static void TestParseWhereAndGroupBy() {
     Lexer lexer("SELECT city, SUM(amount) FROM orders WHERE price > 10 GROUP BY city");
     Parser parser(lexer.Tokenize());
     auto stmt = parser.ParseStatement();
 
-    auto *select = static_cast<SelectStatement *>(stmt.get());
+    auto* select = static_cast<SelectStatement*>(stmt.get());
     CHECK(select->where_clause != nullptr, "Parse: WHERE clause exists");
     CHECK(select->group_by.size() == 1, "Parse: GROUP BY has 1 expression");
     CHECK(select->select_list.size() == 2, "Parse: select list has 2 items");
 
     // 第二个投影项应为聚合函数 SUM
-    auto *agg = static_cast<AggFuncExpr *>(select->select_list[1].expr.get());
+    auto* agg = static_cast<AggFuncExpr*>(select->select_list[1].expr.get());
     CHECK(agg->type == Expr::Type::AGG_FUNC && agg->agg_type == AggType::SUM, "Parse: SUM(amount) is AggFuncExpr");
 }
 
-static void TestParseStar()
-{
+static void TestParseStar() {
     Lexer lexer("SELECT * FROM t;");
     Parser parser(lexer.Tokenize());
     auto stmt = parser.ParseStatement();
 
-    auto *select = static_cast<SelectStatement *>(stmt.get());
+    auto* select = static_cast<SelectStatement*>(stmt.get());
     CHECK(select->select_list.size() == 1, "Parse: SELECT * has 1 item");
-    auto *col = static_cast<ColumnRefExpr *>(select->select_list[0].expr.get());
+    auto* col = static_cast<ColumnRefExpr*>(select->select_list[0].expr.get());
     CHECK(col->column_name == "*", "Parse: star is ColumnRefExpr('*')");
 }
 
-static void TestParseError()
-{
+// 语法错误应抛出异常。
+static void TestParseError() {
     bool threw = false;
-    try
-    {
+    try {
         Lexer lexer("SELECT a FROM;"); // FROM 后缺少表名
         Parser parser(lexer.Tokenize());
         parser.ParseStatement();
-    }
-    catch (const std::runtime_error &)
-    {
+    } catch (const std::runtime_error&) {
         threw = true;
     }
     CHECK(threw, "Parse: missing table name throws error");
 }
 
-int main()
-{
+int main() {
     std::cout << "===== Lexer Tests =====" << std::endl;
     TestLexerBasic();
     TestLexerNumbersAndStrings();

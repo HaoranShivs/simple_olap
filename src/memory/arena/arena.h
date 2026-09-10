@@ -15,7 +15,9 @@ class Arena {
         buffer_.reserve(initial_size);
     }
 
-    // 对齐分配：返回 offset，后续通过 base() + offset 访问
+    // ---------- 分配与回收 ----------
+
+    // 按 alignment 对齐分配一块内存，返回可写指针。
     uint8_t* Allocate(size_t size, size_t alignment = alignof(std::max_align_t)) {
         offset_ = (offset_ + alignment - 1) & ~(alignment - 1);
         if (offset_ + size > buffer_.size()) {
@@ -26,19 +28,24 @@ class Arena {
         return ptr;
     }
 
-    // 一次性回收全部内存（不调用析构函数）
+    // 一次性回收全部内存（不调用析构函数）。
     void Reset() {
         offset_ = 0;
         buffer_.clear();
     }
 
+    // ---------- 观察 ----------
+
+    // 已分配的字节数。
     size_t used() const noexcept {
         return offset_;
     }
 
   private:
+    // ---------- 成员变量 ----------
+
     std::vector<uint8_t> buffer_;
-    size_t offset_ = 0;
+    size_t offset_ = 0; // 下一次分配的起始偏移
 };
 
 } // namespace simple_olap

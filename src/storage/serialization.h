@@ -27,48 +27,36 @@ class BinaryWriter {
     BinaryWriter(BinaryWriter&&) = default;
     BinaryWriter& operator=(BinaryWriter&&) = default;
 
-    /**
-     * 写入单字节无符号整数
-     */
+    // 写入单字节无符号整数
     void WriteUInt8(uint8_t value) {
         buffer_.push_back(value);
     }
 
-    /**
-     * 写入 32 位无符号整数（小端序）
-     */
+    // 写入 32 位无符号整数（小端序）
     void WriteUInt32(uint32_t value) {
         for (uint8_t i = 0; i < 4; ++i) {
             buffer_.push_back(static_cast<uint8_t>((value >> (i * 8)) & 0xFF));
         }
     }
 
-    /**
-     * 写入 64 位无符号整数（小端序）
-     */
+    // 写入 64 位无符号整数（小端序）
     void WriteUInt64(uint64_t value) {
         for (uint8_t i = 0; i < 8; ++i) {
             buffer_.push_back(static_cast<uint8_t>((value >> (i * 8)) & 0xFF));
         }
     }
 
-    /**
-     * 写入 32 位有符号整数（小端序）
-     */
+    // 写入 32 位有符号整数（小端序）
     void WriteInt32(int32_t value) {
         WriteUInt32(static_cast<uint32_t>(value));
     }
 
-    /**
-     * 写入 64 位有符号整数（小端序）
-     */
+    // 写入 64 位有符号整数（小端序）
     void WriteInt64(int64_t value) {
         WriteUInt64(static_cast<uint64_t>(value));
     }
 
-    /**
-     * 写入 32 位浮点数（小端序）
-     */
+    // 写入 32 位浮点数（按位拷贝为整数后写入）
     void WriteFloat(float value) {
         static_assert(sizeof(float) == 4, "float must be 4 bytes");
         uint32_t int_value;
@@ -76,9 +64,7 @@ class BinaryWriter {
         WriteUInt32(int_value);
     }
 
-    /**
-     * 写入 64 位双精度浮点数（小端序）
-     */
+    // 写入 64 位双精度浮点数（按位拷贝为整数后写入）
     void WriteDouble(double value) {
         static_assert(sizeof(double) == 8, "double must be 8 bytes");
         uint64_t long_value;
@@ -86,39 +72,29 @@ class BinaryWriter {
         WriteUInt64(long_value);
     }
 
-    /**
-     * 写入字符串（先写长度，再写内容）
-     */
+    // 写入字符串（先写长度，再写内容）
     void WriteString(const std::string& value) {
         WriteUInt32(static_cast<uint32_t>(value.size()));
         buffer_.insert(buffer_.end(), value.begin(), value.end());
     }
 
-    /**
-     * 写入原始数据
-     */
+    // 写入原始数据
     void WriteRaw(const void* data, size_t size) {
         const uint8_t* bytes = static_cast<const uint8_t*>(data);
         buffer_.insert(buffer_.end(), bytes, bytes + size);
     }
 
-    /**
-     * 获取缓冲区数据
-     */
+    // 获取缓冲区数据
     const std::vector<uint8_t>& GetBuffer() const {
         return buffer_;
     }
 
-    /**
-     * 获取缓冲区大小
-     */
+    // 获取缓冲区大小
     size_t GetSize() const {
         return buffer_.size();
     }
 
-    /**
-     * 清空缓冲区
-     */
+    // 清空缓冲区
     void Clear() {
         buffer_.clear();
     }
@@ -135,14 +111,10 @@ class BinaryWriter {
 
 class BinaryReader {
   public:
-    /**
-     * 从已有数据构造 Reader
-     */
+    // 从已有数据构造 Reader
     explicit BinaryReader(const uint8_t* data, size_t size) : data_(data), size_(size), offset_(0) {}
 
-    /**
-     * 从 vector 构造 Reader
-     */
+    // 从 vector 构造 Reader
     explicit BinaryReader(const std::vector<uint8_t>& data) : data_(data.data()), size_(data.size()), offset_(0) {}
 
     ~BinaryReader() = default;
@@ -151,9 +123,7 @@ class BinaryReader {
     BinaryReader(const BinaryReader&) = delete;
     BinaryReader& operator=(const BinaryReader&) = delete;
 
-    /**
-     * 读取单字节无符号整数
-     */
+    // 读取单字节无符号整数
     uint8_t ReadUInt8() {
         if (offset_ + 1 > size_) {
             throw std::runtime_error("BinaryReader::ReadUInt8 - out of range");
@@ -163,9 +133,7 @@ class BinaryReader {
         return value;
     }
 
-    /**
-     * 读取 32 位无符号整数（小端序）
-     */
+    // 读取 32 位无符号整数（小端序）
     uint32_t ReadUInt32() {
         if (offset_ + 4 > size_) {
             throw std::runtime_error("BinaryReader::ReadUInt32 - out of range");
@@ -178,9 +146,7 @@ class BinaryReader {
         return value;
     }
 
-    /**
-     * 读取 64 位无符号整数（小端序）
-     */
+    // 读取 64 位无符号整数（小端序）
     uint64_t ReadUInt64() {
         if (offset_ + 8 > size_) {
             throw std::runtime_error("BinaryReader::ReadUInt64 - out of range");
@@ -193,23 +159,17 @@ class BinaryReader {
         return value;
     }
 
-    /**
-     * 读取 32 位有符号整数（小端序）
-     */
+    // 读取 32 位有符号整数（小端序）
     int32_t ReadInt32() {
         return static_cast<int32_t>(ReadUInt32());
     }
 
-    /**
-     * 读取 64 位有符号整数（小端序）
-     */
+    // 读取 64 位有符号整数（小端序）
     int64_t ReadInt64() {
         return static_cast<int64_t>(ReadUInt64());
     }
 
-    /**
-     * 读取 32 位浮点数（小端序）
-     */
+    // 读取 32 位浮点数（小端序）
     float ReadFloat() {
         uint32_t int_value = ReadUInt32();
         float value;
@@ -217,9 +177,7 @@ class BinaryReader {
         return value;
     }
 
-    /**
-     * 读取 64 位双精度浮点数（小端序）
-     */
+    // 读取 64 位双精度浮点数（小端序）
     double ReadDouble() {
         uint64_t long_value = ReadUInt64();
         double value;
@@ -227,9 +185,7 @@ class BinaryReader {
         return value;
     }
 
-    /**
-     * 读取字符串
-     */
+    // 读取字符串（先读长度，再读内容）
     std::string ReadString() {
         uint32_t len = ReadUInt32();
         if (offset_ + len > size_) {
@@ -240,9 +196,7 @@ class BinaryReader {
         return result;
     }
 
-    /**
-     * 读取原始数据到缓冲区
-     */
+    // 读取原始数据到缓冲区
     void ReadRaw(void* buffer, size_t size) {
         if (offset_ + size > size_) {
             throw std::runtime_error("BinaryReader::ReadRaw - out of range");
@@ -251,9 +205,7 @@ class BinaryReader {
         offset_ += size;
     }
 
-    /**
-     * 使用 vector 作为数据源
-     */
+    // 使用 vector 作为数据源
     void SetFromVector(const std::vector<uint8_t>& data) {
         buffer_ = data;
         data_ = buffer_.data();
@@ -261,37 +213,27 @@ class BinaryReader {
         offset_ = 0;
     }
 
-    /**
-     * 获取当前读取位置
-     */
+    // 获取当前读取位置
     size_t GetOffset() const {
         return offset_;
     }
 
-    /**
-     * 检查是否读完
-     */
+    // 检查是否读完
     bool IsEof() const {
         return offset_ >= size_;
     }
 
-    /**
-     * 获取总数据大小
-     */
+    // 获取总数据大小
     size_t GetSize() const {
         return size_;
     }
 
-    /**
-     * 获取数据指针
-     */
+    // 获取数据指针
     const uint8_t* GetData() const {
         return data_;
     }
 
-    /**
-     * 跳过指定字节数
-     */
+    // 跳过指定字节数
     void Skip(size_t bytes) {
         if (offset_ + bytes > size_) {
             throw std::runtime_error("BinaryReader::Skip - out of range");

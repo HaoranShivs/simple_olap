@@ -33,11 +33,12 @@ list(FILTER PROJECT_SOURCES EXCLUDE REGEX ".*/main\\.cpp$")
 list(FILTER PROJECT_SOURCES EXCLUDE REGEX ".*/main_test\\.cpp$")
 
 # ---------- 静态库：引擎核心 ----------
+# 并行执行（线程池 / 阻塞队列 / future）依赖 pthread
+find_package(Threads REQUIRED)
+
 add_library(simple_olap_core STATIC ${PROJECT_SOURCES})
 target_include_directories(simple_olap_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
-
-# Linux 下 mmap 由 libc 提供，无需额外链接；
-# 若后续引入线程池并行，再补 find_package(Threads) 与 Threads::Threads。
+target_link_libraries(simple_olap_core PUBLIC Threads::Threads)
 
 # ---------- 可执行：测试入口 ----------
 add_executable(simple_olap ${CMAKE_SOURCE_DIR}/src/main.cpp)
@@ -49,4 +50,17 @@ target_compile_definitions(simple_olap PRIVATE
 # ---------- 可选：编译告警（Debug 下开启） ----------
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(simple_olap_core PRIVATE -Wall -Wextra)
+endif()
+
+# ---------- 可选：benchmark 可执行 ----------
+# 默认开启；用 -DSIMPLE_OLAP_BUILD_BENCHMARK=OFF 关闭。
+# 并行扫描 vs 串行扫描运行时间对比。
+option(SIMPLE_OLAP_BUILD_BENCHMARK "Build benchmark executables" ON)
+
+if(SIMPLE_OLAP_BUILD_BENCHMARK)
+    add_executable(bench_parallel_scan ${CMAKE_SOURCE_DIR}/benchmark/bench_parallel_scan.cpp)
+    target_link_libraries(bench_parallel_scan PRIVATE simple_olap_core)
+    # 注入项目根目录，使默认数据目录与 CWD 无关
+    target_compile_definitions(bench_parallel_scan PRIVATE
+        SIMPLE_OLAP_BENCH_ROOT_DIR="${CMAKE_SOURCE_DIR}")
 endif()

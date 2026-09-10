@@ -3844,3 +3844,36 @@ events:
       Running the CXX compiler's linker: "/usr/bin/ld" "-v"
       GNU ld (GNU Binutils for Ubuntu) 2.38
 ...
+
+---
+events:
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "/usr/share/cmake-4.3/Modules/Internal/CheckSourceCompiles.cmake:104 (try_compile)"
+      - "/usr/share/cmake-4.3/Modules/CheckCXXSourceCompiles.cmake:103 (cmake_check_source_compiles)"
+      - "/usr/share/cmake-4.3/Modules/FindThreads.cmake:162 (check_cxx_source_compiles)"
+      - "/usr/share/cmake-4.3/Modules/FindThreads.cmake:226 (_threads_check_libc)"
+      - "CMakeLists.txt:37 (find_package)"
+    checks:
+      - "Performing Test CMAKE_HAVE_LIBC_PTHREAD"
+    directories:
+      source: "/home/orangepi3/Projects/simple_olap/build/CMakeFiles/CMakeScratch/TryCompile-HfRzrT"
+      binary: "/home/orangepi3/Projects/simple_olap/build/CMakeFiles/CMakeScratch/TryCompile-HfRzrT"
+    cmakeVariables:
+      CMAKE_CXX_FLAGS: ""
+      CMAKE_CXX_FLAGS_DEBUG: "-g"
+      CMAKE_CXX_STDLIB_MODULES_JSON: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+    buildResult:
+      variable: "CMAKE_HAVE_LIBC_PTHREAD"
+      cached: true
+      stdout: |
+        Change Dir: '/home/orangepi3/Projects/simple_olap/build/CMakeFiles/CMakeScratch/TryCompile-HfRzrT'
+        
+        Run Build Command(s): /usr/local/bin/ninja -v cmTC_b82a4
+        [1/2] /usr/bin/g++ -DCMAKE_HAVE_LIBC_PTHREAD  -std=c++17 -o CMakeFiles/cmTC_b82a4.dir/src.cxx.o -c /home/orangepi3/Projects/simple_olap/build/CMakeFiles/CMakeScratch/TryCompile-HfRzrT/src.cxx
+        [2/2] : && /usr/bin/g++   CMakeFiles/cmTC_b82a4.dir/src.cxx.o -o cmTC_b82a4   && :
+        
+      exitCode: 0
+...

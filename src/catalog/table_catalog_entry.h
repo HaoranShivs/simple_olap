@@ -12,9 +12,9 @@ namespace simple_olap {
 // 物理存储（segment 布局、行数等）由 storage/table_storage_meta.h 的
 // TableStorageMeta 负责，两者通过 TableId 关联，互不持有对方。
 struct TableCatalogEntry {
-    TableId table_id = 0;
-    std::string name;
-    TableSchema schema;
+    TableId table_id = 0; // 表 OID，由 Catalog 分配
+    std::string name;     // 表名（catalog 内唯一）
+    TableSchema schema;   // 逻辑 schema：列名、类型、column_id
 
     // 序列化 / 反序列化在条目内部实现，catalog.cpp 只负责文件读写
     void Serialize(BinaryWriter& writer) const {

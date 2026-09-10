@@ -10,6 +10,7 @@
 
 namespace simple_olap {
 
+// 物理计划节点基类：描述「怎么执行」，与具体算子一一对应。
 class PhysicalPlan {
   public:
     enum class Type : uint8_t {
@@ -35,6 +36,8 @@ class PhysicalPlan {
 
 using PhysicalPlanPtr = std::unique_ptr<PhysicalPlan>;
 
+// 已废弃：单 predicate 的旧版 PhysicalSeqScan，被下方支持多 predicate 的版本取代。
+// 确认无引用后可整体删除。
 // class PhysicalSeqScan final : public PhysicalPlan {
 //   public:
 //     PhysicalSeqScan(uint32_t table_oid, std::vector<uint32_t> columns, std::optional<SimplePredicate> predicate)

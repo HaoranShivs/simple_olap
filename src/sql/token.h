@@ -5,12 +5,15 @@
 
 namespace simple_olap {
 enum class TokenType {
-    END,
-    IDENTIFIER, // 表名，列名
+    END, // 输入结束
+
+    // ---------- 标识符与字面量 ----------
+    IDENTIFIER, // 表名、列名
     INTEGER,
     FLOAT,
-    STRING, // 字面量
+    STRING, // 字符串字面量
 
+    // ---------- 关键字 ----------
     SELECT,
     FROM,
     WHERE,
@@ -22,20 +25,23 @@ enum class TokenType {
     INTO,
     VALUES,
     AS, // 列别名: SELECT a AS x
-    // IF, NOT, EXIST, //对应 creat table
+    // 预留关键字（暂未实现）：IF / NOT / EXISTS，用于 CREATE TABLE
 
+    // ---------- 聚合函数名 ----------
     SUM,
     COUNT,
     AVG,
     MIN,
     MAX,
 
-    STAR,      // *号
+    // ---------- 标点 ----------
+    STAR,      // *
     COMMA,     // 逗号
-    SEMICOLON, // 语句结束，有时候一次输入多条语句，这时候需要这个，表示单个语句的结束
+    SEMICOLON, // 语句结束符：一次输入多条语句时用于分隔
     LPAREN,
     RPAREN, // 左右括号
 
+    // ---------- 运算符 ----------
     EQ,
     NE,
     LT,
@@ -48,11 +54,13 @@ enum class TokenType {
     DIV
 };
 
+// 已废弃：源码位置信息暂未实现。
 // struct SourceLocation {
 //     uint32_t line = 1;
 //     uint32_t column = 1;
 // };
 
+// 词法单元：类型 + 原文 + 在 SQL 文本中的起始下标。
 struct Token {
     TokenType type;
     std::string text;

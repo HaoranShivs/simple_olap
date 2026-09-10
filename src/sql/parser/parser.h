@@ -12,65 +12,59 @@
 
 namespace simple_olap {
 
+// SQL 语法解析器：以递归下降方式把 Token 流构造成 AST。
 class Parser {
   public:
     explicit Parser();
 
-    /// @brief 解析总入口。根据当前 Token 的类型（如 SELECT, INSERT）进行分发（Dispatch），
-    /// 调用具体的解析函数，并返回代表抽象语法树（AST）根节点的智能指针。
+    // 解析总入口：按当前 Token 类型分发到具体语句解析函数，返回 AST 根节点。
     StatementPtr ParseStatement(std::vector<Token> tokens);
 
   private:
     // ---------- 语句级解析 ----------
 
-    /// @brief 解析完整的 SELECT 语句。负责按顺序解析 SELECT (投影列), FROM (表), WHERE (过滤),
-    /// GROUP BY (分组), HAVING (聚合过滤), ORDER BY (排序), LIMIT (限制) 等子句，并组装成 SelectStatement 节点。
+    // 解析完整的 SELECT 语句，组装成 SelectStatement。
     std::unique_ptr<SelectStatement> ParseSelect();
 
+    // 解析 CREATE TABLE 语句。
     std::unique_ptr<CreateTableStatement> ParseCreateTable();
 
+    // 解析 INSERT INTO ... VALUES 语句。
     std::unique_ptr<InsertStatement> ParseInsert();
 
-    /// @brief 解析 SELECT 子句中的单个投影项。例如在 SELECT a, b AS c, count(*) 中，
-    /// 它负责解析出 a、b AS c（包含别名）或 count(*)。
+    // 解析单个投影项，如 a、b AS c、COUNT(*)。
     SelectItem ParseSelectItem();
 
-    // ---------- 表达式级解析 ----------
+    // ---------- 表达式解析 ----------
 
-    /// @brief 解析复合表达式。处理二元运算符（如 +, -, AND, OR, =, < 等），负责处理运算符优先级和结合性，构建表达式树。
+    // 解析表达式，处理二元运算符的优先级与结合性。
     ExprPtr ParseExpression();
 
-    /// @brief 解析基本（原子）表达式。作为 ParseExpression 的底层递归基，处理数字/字符串字面量、
-    /// 列名标识符、函数调用（如 COUNT(a)）、以及括号包裹的子表达式 (a + b)。
+    // 解析原子表达式：字面量、列名、函数调用、括号子表达式。
     ExprPtr ParsePrimaryExpression();
 
-    /// @brief 解析列的数据类型（INT / BIGINT / FLOAT / DOUBLE / VARCHAR），
-    /// 用于 CREATE TABLE 的列定义。
+    // ---------- 数据类型解析 ----------
+
+    // 解析列数据类型（INT/BIGINT/FLOAT/DOUBLE/VARCHAR），用于 CREATE TABLE。
     DataType ParseDataType();
 
     // ---------- Token 流操作 ----------
 
-    /// @brief 向前查看（Lookahead）。不消耗 Token，返回当前指针位置向后偏移 offset 的 Token。
-    /// 常用于预测（Predict）下一步的语法结构（例如看到 ( 预测是函数调用还是分组表达式）。
-    /// @param offset 偏移量
+    // 向前查看第 offset 个 Token，不消耗。
     const Token& Peek(size_t offset = 0) const;
 
-    /// @brief 消耗当前 Token。返回当前 Token，并将索引 current_index_ 向后移动一位。
+    // 消耗并返回当前 Token，指针后移一位。
     Token Consume();
 
-    /// @brief 尝试匹配并消耗。如果当前 Token 类型与 type 一致，则消耗它并返回 true,
-    /// 否则不消耗并返回 false。常用于可选语法（如 LIMIT 子句、AS 别名）。
-    /// @param type 匹配类型
+    // 匹配成功则消耗并返回 true，否则不消耗返回 false（用于可选语法）。
     bool Match(TokenType type);
 
-    /// @brief 强制匹配并消耗。如果当前 Token 类型与 type 一致，则消耗并返回；如果不一致，则触发错误
-    /// （抛出异常或记录错误信息 message）。常用于必需语法（如 FROM 后面必须跟表名）。
-    /// @param type 匹配类型
-    /// @param message 错误信息
+    // 强制匹配：不匹配则抛出 message（用于必需语法）。
     Token Expect(TokenType type, const std::string& message);
 
     // ---------- 成员变量 ----------
 
+    // tokens_ 为词法分析结果，current_index_ 为当前读取位置。
     std::vector<Token> tokens_;
     uint32_t current_index_ = 0;
     Lexer lexer_;

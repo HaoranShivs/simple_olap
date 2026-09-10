@@ -11,12 +11,14 @@
 
 namespace simple_olap {
 
+// 下推到存储层的简单谓词，形如 column op literal。
 struct SimplePredicate {
     uint32_t column_index = 0;
     CmpOp op = CmpOp::EQ;
     PlanLiteralValue value;
 };
 
+// 逻辑计划节点基类：只描述「做什么」，不含执行细节。
 class LogicalPlan {
   public:
     enum class Type : uint8_t {
@@ -42,6 +44,8 @@ class LogicalPlan {
 
 using LogicalPlanPtr = std::unique_ptr<LogicalPlan>;
 
+// 已废弃：单 predicate 的旧版 LogicalScan，被下方支持多 predicate 的版本取代。
+// 确认无引用后可整体删除。
 // class LogicalScan final : public LogicalPlan {
 //   public:
 //     explicit LogicalScan(uint32_t table_oid) : LogicalPlan(Type::SCAN), table_oid_(table_oid) {}

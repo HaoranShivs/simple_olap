@@ -10,7 +10,14 @@ static bool IsTypeCompatible(DataType expected, DataType actual) {
     return expected == actual;
 }
 
-// ==================== BinderContext ====================
+// 判定是否为数值类型（SUM/AVG 等聚合的参数校验用）。
+static bool IsNumeric(DataType type) {
+    return type == DataType::INT32 || type == DataType::INT64 || type == DataType::FLOAT || type == DataType::DOUBLE;
+}
+
+// ==========================================
+// BinderContext
+// ==========================================
 
 // 根据列名查找表 OID 和列索引
 std::optional<std::pair<uint32_t, uint32_t>> BinderContext::FindColumn(const std::string& col_name) {
@@ -36,8 +43,11 @@ DataType BinderContext::GetColumnType(uint32_t table_oid, uint32_t col_idx) cons
     return DataType::INVALID;
 }
 
-// ==================== Binder ====================
+// ==========================================
+// Binder
+// ==========================================
 
+// ---------- 语句绑定 ----------
 BoundStatementPtr Binder::BindCreateTable(const CreateTableStatement& stmt) {
     // 1. 检查表是否已存在（Catalog::FindTable 仅查元数据，未找到返回空 optional）
     if (catalog_.FindTable(stmt.table_name).has_value()) {
@@ -173,7 +183,7 @@ BoundStatementPtr Binder::BindInsert(const InsertStatement& stmt) {
     return result;
 }
 
-// 1. 总入口
+// 绑定 SELECT：构建上下文 -> 绑定 FROM/SELECT/WHERE/GROUP BY -> 聚合校验。
 BoundStatementPtr Binder::BindSelect(const SelectStatement& stmt) {
     context_ = std::make_unique<BinderContext>();
 
@@ -192,7 +202,8 @@ BoundStatementPtr Binder::BindSelect(const SelectStatement& stmt) {
                                                   std::move(bound_where), std::move(bound_group_by));
 }
 
-// 2. 表达式绑定接口：按 AST 表达式类型分发
+// ---------- 表达式绑定 ----------
+// 按 AST 表达式类型分发。
 std::unique_ptr<BoundExpr> Binder::BindExpr(const Expr& expr) {
     switch (expr.type) {
     case Expr::Type::COLUMN_REF:
@@ -207,7 +218,7 @@ std::unique_ptr<BoundExpr> Binder::BindExpr(const Expr& expr) {
     throw SemanticException("Unknown expression type.");
 }
 
-// 3. 列绑定实现 (展示名称解析过程)
+// 列引用绑定：把列名解析为 (表 OID, 列索引) 并推导类型。
 std::unique_ptr<BoundExpr> Binder::BindColumnRef(const ColumnRefExpr& expr) {
     auto res = context_->FindColumn(expr.column_name);
     if (!res.has_value()) {
@@ -259,33 +270,7 @@ std::unique_ptr<BoundExpr> Binder::BindBinaryOp(const BinaryOpExpr& expr) {
     return std::make_unique<BoundBinaryOp>(expr.op, std::move(left), std::move(right), dtype);
 }
 
-// 4. 聚合合法性校验 (OLAP 必须)
-void Binder::ValidateAggregations(const std::vector<BoundSelectItem>& select_list,
-                                  const std::vector<std::unique_ptr<BoundExpr>>& group_by) {
-    bool has_group_by = !group_by.empty();
-    for (const auto& item : select_list) {
-        if (!ContainsAggregate(*item.expr) && has_group_by) {
-            if (!IsInGroupBy(*item.expr, group_by)) {
-                throw SemanticException("SELECT column must appear in GROUP BY clause.");
-            }
-        }
-    }
-}
-
-bool Binder::IsInGroupBy(const BoundExpr& expr, const std::vector<std::unique_ptr<BoundExpr>>& group_by) {
-    // 遍历 GROUP BY 列表，只要找到一个语义等价的表达式即可
-    for (const auto& g_expr : group_by) {
-        if (BoundExpr::IsExprEqual(expr, *g_expr)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool IsNumeric(DataType type) {
-    return type == DataType::INT32 || type == DataType::INT64 || type == DataType::FLOAT || type == DataType::DOUBLE;
-}
-
+// 绑定聚合函数：推导 COUNT/SUM/AVG/MIN/MAX 的结果类型，并校验参数与嵌套。
 std::unique_ptr<BoundExpr> Binder::BindAggFunc(const AggFuncExpr& expr) {
     if (!expr.arg) {
         if (expr.agg_type != AggType::COUNT) {
@@ -320,6 +305,31 @@ std::unique_ptr<BoundExpr> Binder::BindAggFunc(const AggFuncExpr& expr) {
     }
 }
 
+// ---------- 语义校验 ----------
+// 校验 SELECT 项与 GROUP BY 的聚合合法性。
+void Binder::ValidateAggregations(const std::vector<BoundSelectItem>& select_list,
+                                  const std::vector<std::unique_ptr<BoundExpr>>& group_by) {
+    bool has_group_by = !group_by.empty();
+    for (const auto& item : select_list) {
+        if (!ContainsAggregate(*item.expr) && has_group_by) {
+            if (!IsInGroupBy(*item.expr, group_by)) {
+                throw SemanticException("SELECT column must appear in GROUP BY clause.");
+            }
+        }
+    }
+}
+
+bool Binder::IsInGroupBy(const BoundExpr& expr, const std::vector<std::unique_ptr<BoundExpr>>& group_by) {
+    // 遍历 GROUP BY 列表，只要找到一个语义等价的表达式即可
+    for (const auto& g_expr : group_by) {
+        if (BoundExpr::IsExprEqual(expr, *g_expr)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 判断表达式树中是否包含聚合函数。
 bool Binder::ContainsAggregate(const BoundExpr& expr) const {
     if (expr.type == BoundExpr::Type::AGG_FUNC)
         return true;
@@ -330,9 +340,8 @@ bool Binder::ContainsAggregate(const BoundExpr& expr) const {
     return false;
 }
 
-// 绑定 FROM 子句中的表引用：
-// 1. 通过 Catalog 按名字查找表，不存在则报语义错误
-// 2. 取出表 Schema（列名 + 列类型），连同表 OID 一起记录到 BinderContext
+// ---------- 上下文与列表辅助 ----------
+// 绑定 FROM 表引用：查 Catalog 取 Schema，连同 OID 记录到 BinderContext。
 void Binder::BindTableRef(const std::string& table_name) {
     // 1. 查表：仅查元数据，不要求表已载入内存
     auto table_oid = catalog_.FindTable(table_name);
@@ -358,6 +367,7 @@ void Binder::BindTableRef(const std::string& table_name) {
     context_->tables_.push_back(std::move(bound));
 }
 
+// 绑定 SELECT 列表，展开 SELECT * 并保留别名。
 std::vector<BoundSelectItem> Binder::BindSelectList(const std::vector<SelectItem>& select_list) {
     std::vector<BoundSelectItem> bound_list;
 
@@ -387,6 +397,7 @@ std::vector<BoundSelectItem> Binder::BindSelectList(const std::vector<SelectItem
     return bound_list;
 }
 
+// 绑定 GROUP BY 表达式列表。
 std::vector<BndExprPtr> Binder::BindGroupBy(const std::vector<ExprPtr>& group_by) {
     std::vector<BndExprPtr> bound_list;
     bound_list.reserve(group_by.size());

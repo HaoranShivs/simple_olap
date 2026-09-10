@@ -20,9 +20,16 @@ constexpr uint32_t kMaxSegmentRowCount = 65536;
 // 扫描游标：记录当前读取位置
 //
 // segment_id 实际上是 table_meta_.segment_ids 数组中的下标。
+//
+// 扫描进度完全由游标自身持有，不依赖 TableStorage 上的共享分配器状态，
+// 因此同一张表可以被重复扫描、也可以被多个查询并发扫描而互不干扰。
+// kInvalidSegmentId 为哨兵值，表示尚未开始，首次 Scan 时置为 0。
+constexpr SegmentId kInvalidSegmentId = 0xFFFFFFFFu;
+
 struct ScanCursor {
-    SegmentId segment_id = 4294967295; // segment_ids 数组中的 index， 初始值为uint32最大值。
-    uint32_t offset_in_segment = 0;    // 在当前 segment 内的行偏移
+    // segment_ids 数组下标；kInvalidSegmentId 表示尚未开始。
+    SegmentId segment_id = kInvalidSegmentId;
+    uint32_t offset_in_segment = 0; // 在当前 segment 内的行偏移
 
     // 当前 segment 的 metadata 判断结果是否有效。
     // 每个 segment 只在起点做一次 metadata 判断，之后整个 segment 复用。
@@ -40,6 +47,21 @@ struct ScanCursor {
         segment_decision_valid = false;
         row_filter_mask.clear();
     }
+};
+
+// 单 segment 扫描游标：TableStorage::ScanSegment 的推进状态。
+// 与 ScanCursor 不同，它不记录 segment id（由调用方指定），
+// 只记录 segment 内偏移与 metadata 判断结果。
+struct SegmentScanCursor {
+    uint32_t offset = 0;
+
+    // 当前 segment 的 metadata 判断结果是否有效（每个 segment 只做一次）
+    bool decision_valid = false;
+
+    // 与 ScanOptions::predicates 一一对应：
+    //   1: 该 predicate 需要逐行精确执行（NEED_FILTER）
+    //   0: metadata 已证明全部满足（ALL_MATCH）
+    std::vector<uint8_t> row_filter_mask;
 };
 
 struct Condition {
@@ -128,7 +150,9 @@ struct CatalogMeta {
 
 struct TableMeta {
     uint32_t table_id;
-    std::string name; // table层面不需要知道自己的名字吗？实际上不需要，但是有的话会很方便
+
+    // 冗余保存表名：表逻辑上不依赖它，但便于调试与阅读
+    std::string name;
 
     TableSchema schema;
 
@@ -205,7 +229,7 @@ struct SegmentMeta {
 
     std::vector<ColumnChunkMeta> col_chunk_metas_;
 
-    // 键的最大值最小值，主键的稀疏索引等，不过在本项目中忽略。
+    // 预留扩展位：键的 min/max、主键稀疏索引等；本项目暂不使用。
 
     void Serialize(BinaryWriter& writer) const {
         writer.WriteUInt32(segment_id);

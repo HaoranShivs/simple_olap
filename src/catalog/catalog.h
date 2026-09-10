@@ -12,31 +12,12 @@
 
 namespace simple_olap {
 
+// 表目录：逻辑元数据（表名 / table_id / schema）的唯一权威来源。
 // 不持有任何运行中的物理存储对象，不感知 Segment / mmap / 磁盘布局。
 // 物理存储由平级的 StorageManager 负责，两者只通过 TableId 关联；
 // 由更上层的 Database（或 DDL Executor）协调二者。
 class Catalog {
   public:
-    // ---------- 查询（binder / optimizer 高频路径，纯内存） ----------
-
-    // 表是否存在：存在返回 table_id，否则返回空 optional
-    std::optional<TableId> FindTable(std::string_view table_name) const;
-
-    // 按表名取目录条目；不存在返回 nullptr
-    const TableCatalogEntry* GetTable(std::string_view table_name) const;
-
-    // 按 table_id 取目录条目；不存在返回 nullptr
-    const TableCatalogEntry* GetTable(TableId table_id) const;
-
-    // ---------- 变更 ----------
-
-    // 创建新表条目：column_id 按列顺序从 0 分配，table_id 自动分配。
-    // 成功后立即持久化 catalog.meta；失败返回 false 且不留副作用。
-    bool CreateTable(const CreateTableStatement& stmt);
-
-    // 删除表条目（物理数据目录由 StorageManager::DropTable 负责）
-    bool DropTable(std::string_view table_name);
-
     // ---------- 持久化 ----------
 
     // 创建 catalog 根目录并写入空元数据；已存在则拒绝
@@ -48,6 +29,26 @@ class Catalog {
     // 把内存元数据写回 catalog 根目录
     bool SaveMeta() const;
 
+    // ---------- 表变更 ----------
+
+    // 创建新表条目：column_id 按列顺序从 0 分配，table_id 自动分配。
+    // 成功后立即持久化 catalog.meta；失败返回 false 且不留副作用。
+    bool CreateTable(const CreateTableStatement& stmt);
+
+    // 删除表条目（物理数据目录由 StorageManager::DropTable 负责）
+    bool DropTable(std::string_view table_name);
+
+    // ---------- 查询（binder / optimizer 高频路径，纯内存） ----------
+
+    // 表是否存在：存在返回 table_id，否则返回空 optional
+    std::optional<TableId> FindTable(std::string_view table_name) const;
+
+    // 按表名取目录条目；不存在返回 nullptr
+    const TableCatalogEntry* GetTable(std::string_view table_name) const;
+
+    // 按 table_id 取目录条目；不存在返回 nullptr
+    const TableCatalogEntry* GetTable(TableId table_id) const;
+
     // ---------- 调试/REPL 观察 ----------
 
     // 表名 -> table_id 映射（只读）
@@ -56,6 +57,7 @@ class Catalog {
     }
 
   private:
+    // 分配下一个可用的 table_id（现有最大值 + 1）。
     TableId NextTableId() const;
 
     // name -> table_id 索引

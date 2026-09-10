@@ -23,8 +23,9 @@ class Connection {
     }
 
   private:
-    Database& database_;
+    Database& database_; // 所属数据库（Catalog / StorageManager 的持有者）
 
+    // 单次查询的临时内存池，Query 返回后随 Connection 一同释放。
     Arena query_arena_;
 };
 

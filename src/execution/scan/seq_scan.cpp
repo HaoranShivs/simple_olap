@@ -9,6 +9,12 @@
 namespace simple_olap {
 
 void SeqScanOperator::Init() {
+    if (stream_) {
+        // 并行模式：BatchStream 由 ParallelScanSession 管理，
+        // Start() 在首次 Next() 时自动触发，这里无需初始化游标。
+        return;
+    }
+
     if (ctx_ == nullptr || ctx_->catalog == nullptr || ctx_->storage_manager == nullptr) {
         throw std::runtime_error("SeqScanOperator: missing execution context");
     }
@@ -30,13 +36,19 @@ void SeqScanOperator::Init() {
 }
 
 bool SeqScanOperator::Next(VectorBatch& batch) {
+    ClearBatch(batch);
+
+    if (stream_) {
+        // 并行模式：BatchStream::Next() -> BatchQueue::Pop()
+        return stream_->Next(batch);
+    }
+
     if (table_ == nullptr) {
         throw std::runtime_error("SeqScanOperator::Next called before Init");
     }
 
-    ClearBatch(batch);
-
-    // 跨 segment 推进游标并提取数据（zone map pruning + row filter 在存储层完成）
+    // 串行模式：跨 segment 推进游标并提取数据
+    // （zone map pruning + row filter 在存储层完成）
     return table_->Scan(options_, cursor_, batch);
 }
 

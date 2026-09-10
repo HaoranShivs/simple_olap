@@ -29,7 +29,7 @@ StatementPtr Parser::ParseStatement(std::vector<Token> tokens) {
 }
 
 // ============================================================
-// SELECT 语句解析
+// 语句解析
 // ============================================================
 
 std::unique_ptr<SelectStatement> Parser::ParseSelect() {
@@ -70,7 +70,7 @@ std::unique_ptr<CreateTableStatement> Parser::ParseCreateTable() {
 
     Expect(TokenType::TABLE, "Expected 'TABLE' after CREATE");
 
-    // 检查 IF NOT EXISTS（暂不支持，词法层未提供 IF/NOT/EXISTS 关键字）
+    // IF NOT EXISTS 暂不支持（词法层未提供 IF/NOT/EXISTS 关键字）
     // if (Match(TokenType::IF)) { ... }
 
     stmt->table_name = Expect(TokenType::IDENTIFIER, "Expected table name").text;
@@ -94,31 +94,6 @@ std::unique_ptr<CreateTableStatement> Parser::ParseCreateTable() {
     // 可选：解析 ORDER BY (sort_keys) ...
 
     return stmt;
-}
-
-// 解析列数据类型：INT / BIGINT / FLOAT / DOUBLE / VARCHAR
-// 类型名在词法层是普通 IDENTIFIER，这里按文本匹配
-DataType Parser::ParseDataType() {
-    const Token& token = Expect(TokenType::IDENTIFIER, "Expected data type");
-
-    // 转大写以便大小写不敏感匹配
-    std::string upper = token.text;
-    for (char& c : upper) {
-        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-    }
-
-    if (upper == "INT" || upper == "INTEGER")
-        return DataType::INT32;
-    if (upper == "BIGINT")
-        return DataType::INT64;
-    if (upper == "FLOAT")
-        return DataType::FLOAT;
-    if (upper == "DOUBLE")
-        return DataType::DOUBLE;
-    if (upper == "VARCHAR")
-        return DataType::VARCHAR;
-
-    throw std::runtime_error("Unknown data type: " + token.text);
 }
 
 std::unique_ptr<InsertStatement> Parser::ParseInsert() {
@@ -192,6 +167,35 @@ SelectItem Parser::ParseSelectItem() {
     }
 
     return SelectItem(std::move(expr), std::move(alias));
+}
+
+// ============================================================
+// 数据类型解析
+// ============================================================
+
+// 解析列数据类型：INT / BIGINT / FLOAT / DOUBLE / VARCHAR。
+// 类型名在词法层是普通 IDENTIFIER，这里按文本匹配。
+DataType Parser::ParseDataType() {
+    const Token& token = Expect(TokenType::IDENTIFIER, "Expected data type");
+
+    // 转大写以便大小写不敏感匹配
+    std::string upper = token.text;
+    for (char& c : upper) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+
+    if (upper == "INT" || upper == "INTEGER")
+        return DataType::INT32;
+    if (upper == "BIGINT")
+        return DataType::INT64;
+    if (upper == "FLOAT")
+        return DataType::FLOAT;
+    if (upper == "DOUBLE")
+        return DataType::DOUBLE;
+    if (upper == "VARCHAR")
+        return DataType::VARCHAR;
+
+    throw std::runtime_error("Unknown data type: " + token.text);
 }
 
 // ============================================================
@@ -275,10 +279,10 @@ ExprPtr Parser::ParsePrimaryExpression() {
                 throw std::runtime_error("Unknown function: " + name);
             }
 
-            // ExprPtr arg = ParseExpression();
+            // arg 为空表示 COUNT(*)；其余聚合必须带参数。
             ExprPtr arg = nullptr;
             if (Match(TokenType::STAR)) {
-                // mini_olap 中只有 COUNT 支持 '*'
+                // 当前实现中只有 COUNT 支持 '*'
                 if (agg_type != AggType::COUNT) {
                     throw std::runtime_error("Only COUNT(*) supports '*' as aggregate argument");
                 }

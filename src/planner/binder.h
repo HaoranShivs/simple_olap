@@ -38,11 +38,13 @@ class BinderContext {
     DataType GetColumnType(uint32_t table_oid, uint32_t col_idx) const;
 };
 
+// 语义绑定器：把 AST 解析为带类型与列来源信息的 BoundStatement。
+// 负责名称解析、类型推导，以及聚合查询的合法性校验。
 class Binder {
   public:
     explicit Binder(Catalog& catalog) : catalog_(catalog) {}
 
-    // 1. 总入口
+    // 语句绑定总入口：按语句类型分发。
     BoundStatementPtr BindStatement(const Statement& stmt) {
         switch (stmt.GetType()) {
         case Statement::Type::SELECT:
@@ -60,15 +62,16 @@ class Binder {
     }
 
   private:
+    // ---------- 语句绑定 ----------
     BoundStatementPtr BindSelect(const SelectStatement& stmt);
 
     BoundStatementPtr BindInsert(const InsertStatement& stmt);
 
     BoundStatementPtr BindCreateTable(const CreateTableStatement& stmt);
-    // 2. 表达式绑定接口
+
+    // ---------- 表达式绑定 ----------
     std::unique_ptr<BoundExpr> BindExpr(const Expr& expr);
 
-    // 3. 列绑定实现 (展示名称解析过程)
     std::unique_ptr<BoundExpr> BindColumnRef(const ColumnRefExpr& expr);
 
     std::unique_ptr<BoundExpr> BindLiteral(const LiteralExpr& expr);
@@ -77,7 +80,8 @@ class Binder {
 
     std::unique_ptr<BoundExpr> BindAggFunc(const AggFuncExpr& expr);
 
-    // 4. 聚合合法性校验 (OLAP 必须)
+    // ---------- 语义校验与辅助 ----------
+    // 校验 SELECT 项与 GROUP BY 的聚合合法性。
     void ValidateAggregations(const std::vector<BoundSelectItem>& select_list,
                               const std::vector<std::unique_ptr<BoundExpr>>& group_by);
 

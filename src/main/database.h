@@ -23,12 +23,15 @@ namespace simple_olap {
 // CREATE TABLE / DROP TABLE 等 DDL 由 Database 协调二者完成。
 class Database {
   public:
+    // path 为数据库根目录；已存在则加载，否则新建。
     explicit Database(std::filesystem::path path, DatabaseConfig config = {});
 
     ~Database();
 
     Database(const Database&) = delete;
     Database& operator=(const Database&) = delete;
+
+    // ---------- 访问器 ----------
 
     Catalog& GetCatalog() {
         return catalog_;
@@ -46,6 +49,15 @@ class Database {
         return config_;
     }
 
+    // 运行期切换执行模式：只影响后续查询，可反复在单线程/多线程间对比。
+    void SetExecutionMode(ExecutionMode mode) {
+        config_.execution_mode = mode;
+    }
+
+    ExecutionMode GetExecutionMode() const {
+        return config_.execution_mode;
+    }
+
     const std::filesystem::path& GetPath() const {
         return path_;
     }
@@ -59,12 +71,14 @@ class Database {
     bool DropTable(std::string_view table_name);
 
   private:
+    // 加载已有元数据；不存在则创建空的 catalog。
     void Initialize();
 
   private:
-    std::filesystem::path path_;
+    std::filesystem::path path_; // 数据库根目录
     DatabaseConfig config_;
 
+    // 以下三者平级：逻辑元数据 / 物理存储 / 执行线程池。
     Catalog catalog_;
     StorageManager storage_manager_;
     ThreadPool thread_pool_;
