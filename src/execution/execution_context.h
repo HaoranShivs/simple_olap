@@ -3,7 +3,8 @@
 #include <cstdint>
 
 #include "../catalog/catalog.h"
-#include "../memory/arena/arena.h"
+#include "../memory/buffer_pool/buffer_pool.h"
+#include "../memory/query_memory_context/query_memory_context.h"
 #include "../parallel/parallel_config.h"
 #include "../parallel/thread_pool/thread_pool.h"
 #include "../storage/storage_manager.h"
@@ -33,9 +34,13 @@ struct ExecutionContext {
 
     StorageManager* storage_manager = nullptr;
 
-    Arena* arena = nullptr;
-
     ThreadPool* thread_pool = nullptr;
+
+    // 一条 SQL 一个实例：coordinator Arena + worker Arenas。
+    QueryMemoryContext* memory = nullptr;
+
+    // 执行期 buffer 池（VectorBatch / ColumnData）。
+    BufferPool* buffer_pool = nullptr;
 
     // 本条语句的执行模式，由上层（Connection）按需设置。
     ExecutionMode execution_mode = ExecutionMode::AUTO;
@@ -45,8 +50,10 @@ struct ExecutionContext {
     ParallelConfig parallel_config;
 
     // 引用式构造：成员仍以指针存储，执行层统一用 -> 访问
-    ExecutionContext(Catalog& catalog_ref, StorageManager& storage_ref, ThreadPool& pool_ref, Arena& arena_ref)
-        : catalog(&catalog_ref), storage_manager(&storage_ref), arena(&arena_ref), thread_pool(&pool_ref) {}
+    ExecutionContext(Catalog& catalog_ref, StorageManager& storage_ref, ThreadPool& pool_ref,
+                     QueryMemoryContext& memory_ref, BufferPool& buffer_pool_ref)
+        : catalog(&catalog_ref), storage_manager(&storage_ref), thread_pool(&pool_ref), memory(&memory_ref),
+          buffer_pool(&buffer_pool_ref) {}
 
     // 默认构造：全部置空，逐字段注入
     ExecutionContext() = default;

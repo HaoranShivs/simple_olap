@@ -4,6 +4,7 @@
 #include <memory>
 #include <unordered_map>
 
+#include "../memory/buffer_pool/buffer_pool.h"
 #include "../type.h"
 #include "table/table_storage.h"
 
@@ -24,7 +25,10 @@ class TableSchema;
 // 将来 BufferManager / BlockManager / WAL / Checkpoint 也挂在这里。
 class StorageManager {
   public:
-    explicit StorageManager(std::filesystem::path db_path);
+    // buffer_pool 由 Database 注入（Database 生命周期覆盖 StorageManager），
+    // 沿 StorageManager -> TableStorage -> ParallelScanSession 传递，
+    // 使扫描产出的 VectorBatch 绑定 BufferPool。
+    StorageManager(std::filesystem::path db_path, BufferPool* buffer_pool);
 
     StorageManager(const StorageManager&) = delete;
     StorageManager& operator=(const StorageManager&) = delete;
@@ -60,6 +64,9 @@ class StorageManager {
     std::filesystem::path TablesRoot() const;
 
     std::filesystem::path root_path_;
+
+    // Database 注入的 BufferPool，传递给创建的 TableStorage。
+    BufferPool* buffer_pool_ = nullptr;
 
     // 已打开表的物理存储缓存：table_id -> TableStorage
     std::unordered_map<TableId, std::shared_ptr<TableStorage>> tables_;

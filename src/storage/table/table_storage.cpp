@@ -141,7 +141,7 @@ void ApplyRowPredicates(const ScanOptions& options, const std::vector<uint8_t>& 
 // ---------- 创建 / 打开 ----------
 
 std::unique_ptr<TableStorage> TableStorage::Create(TableId table_id, const TableSchema& schema,
-                                                   const std::filesystem::path& tables_root) {
+                                                   const std::filesystem::path& tables_root, BufferPool* buffer_pool) {
     // 1. 创建表数据目录：tables_root / {table_id}
     const std::filesystem::path table_path = tables_root / std::to_string(table_id);
     std::error_code ec;
@@ -171,11 +171,12 @@ std::unique_ptr<TableStorage> TableStorage::Create(TableId table_id, const Table
     }
 
     // 3. 构造 TableStorage（构造时立即创建空 SegmentBuilder）
-    return std::unique_ptr<TableStorage>(new TableStorage(table_id, table_path, schema, std::move(metadata)));
+    return std::unique_ptr<TableStorage>(
+        new TableStorage(table_id, table_path, schema, std::move(metadata), buffer_pool));
 }
 
 std::unique_ptr<TableStorage> TableStorage::Open(TableId table_id, const TableSchema& schema,
-                                                 const std::filesystem::path& tables_root) {
+                                                 const std::filesystem::path& tables_root, BufferPool* buffer_pool) {
     // 1. 读取并反序列化 table.meta（segment 布局）
     const std::filesystem::path table_path = tables_root / std::to_string(table_id);
     const std::filesystem::path meta_path = table_path / "table.meta";
@@ -196,12 +197,14 @@ std::unique_ptr<TableStorage> TableStorage::Open(TableId table_id, const TableSc
     }
 
     // 3. 构造 TableStorage（schema 由上层 StorageManager 从 Catalog 取出后传入）
-    return std::unique_ptr<TableStorage>(new TableStorage(table_id, table_path, schema, std::move(metadata)));
+    return std::unique_ptr<TableStorage>(
+        new TableStorage(table_id, table_path, schema, std::move(metadata), buffer_pool));
 }
 
 TableStorage::TableStorage(TableId table_id, std::filesystem::path table_path, const TableSchema& schema,
-                           TableStorageMeta metadata)
-    : table_id_(table_id), schema_(&schema), metadata_(std::move(metadata)), table_path_(std::move(table_path)) {
+                           TableStorageMeta metadata, BufferPool* buffer_pool)
+    : table_id_(table_id), schema_(&schema), metadata_(std::move(metadata)), table_path_(std::move(table_path)),
+      buffer_pool_(buffer_pool) {
     // 新 segment 的 id 从已落盘最大 id + 1 开始
     SegmentId next = 0;
     for (SegmentId id : metadata_.segment_ids) {
@@ -459,7 +462,8 @@ bool TableStorage::Scan(const ScanOptions& options, ScanCursor& cursor, VectorBa
 std::shared_ptr<BatchStream> TableStorage::CreateParallelScan(const ScanOptions& options, size_t scan_threads,
                                                               size_t queue_capacity) {
     // 已落盘 segment 的 id 列表是本次并行扫描的完整输入
-    return std::make_shared<ParallelScanSession>(this, metadata_.segment_ids, options, scan_threads, queue_capacity);
+    return std::make_shared<ParallelScanSession>(this, metadata_.segment_ids, options, scan_threads, queue_capacity,
+                                                 buffer_pool_);
 }
 
 } // namespace simple_olap

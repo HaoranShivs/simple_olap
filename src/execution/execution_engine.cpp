@@ -102,7 +102,8 @@ ExecutionResult ExecutionEngine::ExecuteSerialQuery(const PhysicalPlan& plan, co
 
     // ---------- 3. Pull execution ----------
 
-    VectorBatch batch;
+    // 执行期 batch 绑定 BufferPool：owned buffer 走池化分配
+    VectorBatch batch(ctx_->buffer_pool);
 
     while (true) {
         // 每次 Next 都要求产生一个新的逻辑 batch。

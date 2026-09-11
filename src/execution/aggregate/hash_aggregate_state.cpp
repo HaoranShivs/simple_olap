@@ -35,11 +35,11 @@ size_t HashAggregateState::GroupKeyHash::operator()(const GroupKey& key) const {
 }
 
 HashAggregateState::StateVector HashAggregateState::MakeStates() const {
-    return StateVector(agg_calls_->size());
+    return StateVector(agg_calls_->size(), AggState{}, memory_);
 }
 
 HashAggregateState::GroupKey HashAggregateState::EvalGroupKey(const VectorBatch& batch, uint32_t physical_row) const {
-    GroupKey key;
+    GroupKey key(memory_);
     key.values.reserve(group_exprs_->size());
     for (const auto& expr : *group_exprs_) {
         key.values.push_back(expr->Eval(batch, physical_row));
@@ -157,11 +157,16 @@ void HashAggregateState::Consume(VectorBatch& batch) {
 }
 
 void HashAggregateState::Merge(HashAggregateState&& other) {
-    for (auto& [key, states] : other.groups_) {
-        auto [it, inserted] = groups_.try_emplace(std::move(key), MakeStates());
+    // worker Arena 中的 PMR 对象不能直接 move 成 coordinator Arena 的长期对象：
+    // worker key 必须先拷贝进本 state 的 Arena（memory_），两个 Arena 完全解耦。
+    for (auto& [source_key, source_states] : other.groups_) {
+        GroupKey lookup_key(memory_);
+        lookup_key.values.assign(source_key.values.begin(), source_key.values.end());
+
+        auto [it, inserted] = groups_.try_emplace(std::move(lookup_key), MakeStates());
         auto& dst_states = it->second;
         for (uint32_t i = 0; i < static_cast<uint32_t>(agg_calls_->size()); ++i) {
-            CombineAggregate((*agg_calls_)[i], dst_states[i], states[i]);
+            CombineAggregate((*agg_calls_)[i], dst_states[i], source_states[i]);
         }
     }
 }
@@ -177,14 +182,13 @@ bool HashAggregateState::NextResult(VectorBatch& output) {
         return false;
     }
 
-    std::vector<const GroupTable::value_type*> rows;
-    rows.reserve(VectorBatch::BATCH_SIZE);
-    while (emit_it_ != groups_.end() && rows.size() < VectorBatch::BATCH_SIZE) {
-        rows.push_back(&*emit_it_);
+    // 临时 rows 直接放栈上，完全消除 allocator 调用。
+    std::array<const GroupTable::value_type*, VectorBatch::BATCH_SIZE> rows;
+    uint32_t row_count = 0;
+    while (emit_it_ != groups_.end() && row_count < VectorBatch::BATCH_SIZE) {
+        rows[row_count++] = &*emit_it_;
         ++emit_it_;
     }
-
-    const uint32_t row_count = static_cast<uint32_t>(rows.size());
     ClearBatch(output);
     for (const auto& spec : *outputs_) {
         output.AddColumn(spec.type);

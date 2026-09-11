@@ -6,6 +6,7 @@
 #include <unordered_map>
 
 #include "../../execution/vector/vector.h"
+#include "../../memory/buffer_pool/buffer_pool.h"
 #include "../../type.h"
 #include "../datachunk.h"
 #include "../datastructs.h"
@@ -33,12 +34,14 @@ class TableStorage {
 
     // 创建新表：建目录 tables/{table_id} 并写入 table.meta
     static std::unique_ptr<TableStorage> Create(TableId table_id, const TableSchema& schema,
-                                                const std::filesystem::path& tables_root);
+                                                const std::filesystem::path& tables_root,
+                                                BufferPool* buffer_pool = nullptr);
 
     // 从硬盘打开已有表（读取 table.meta）。
     // schema 的权威来源在 Catalog，由上层 StorageManager 取出后传入。
     static std::unique_ptr<TableStorage> Open(TableId table_id, const TableSchema& schema,
-                                              const std::filesystem::path& tables_root);
+                                              const std::filesystem::path& tables_root,
+                                              BufferPool* buffer_pool = nullptr);
 
     ~TableStorage();
 
@@ -63,6 +66,7 @@ class TableStorage {
     // 并行扫描入口：创建 ParallelScanSession（BatchStream）。
     // 调用方 Start() 后通过 BatchStream::Next() 拉取批次；
     // scan 线程在 storage 内部由 session 管理（atomic next_segment 分配）。
+    // scan worker 产出的 VectorBatch 绑定本表持有的 BufferPool。
     std::shared_ptr<BatchStream> CreateParallelScan(const ScanOptions& options, size_t scan_threads,
                                                     size_t queue_capacity);
 
@@ -89,7 +93,7 @@ class TableStorage {
 
   private:
     TableStorage(TableId table_id, std::filesystem::path table_path, const TableSchema& schema,
-                 TableStorageMeta metadata);
+                 TableStorageMeta metadata, BufferPool* buffer_pool);
 
     void SealActiveSegment();
 
@@ -127,6 +131,9 @@ class TableStorage {
     SegmentId next_segment_id_ = 0;
 
     std::unique_ptr<SegmentBuilder> active_segment_;
+
+    // 注入的 BufferPool：scan worker 产出的 VectorBatch 绑定它。
+    BufferPool* buffer_pool_ = nullptr;
 };
 
 } // namespace simple_olap

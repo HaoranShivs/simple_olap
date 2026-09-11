@@ -1,5 +1,6 @@
 #include "connection.h"
 
+#include <algorithm>
 #include <iostream>
 #include <stdexcept>
 
@@ -8,6 +9,7 @@
 #include "../execution/executor_builder.h"
 #include "../execution/operator.h"
 #include "../execution/vector/vector.h"
+#include "../memory/query_memory_context/query_memory_context.h"
 #include "../planner/binder.h"
 #include "../planner/optimizer/optimizer.h"
 #include "../planner/physical_plan/physical_planner.h"
@@ -20,7 +22,11 @@ namespace simple_olap {
 // 执行一条 SQL：串联 Lexer -> Parser -> Binder -> Planner -> Optimizer
 // -> PhysicalPlanner -> ExecutionEngine，返回结果集。
 QueryResult Connection::Query(std::string_view sql) {
-    query_arena_.Reset();
+    // 一条 SQL 一个 QueryMemoryContext：
+    //   coordinator Arena + worker Arenas，Query 返回时由 RAII 归还 BlockPool。
+    const size_t worker_count = std::max<size_t>(1, database_.GetConfig().parallel_config.compute_threads);
+
+    QueryMemoryContext query_memory(database_.GetBlockPool(), worker_count);
 
     // ---------- 1. 词法分析 ----------
 
@@ -54,8 +60,8 @@ QueryResult Connection::Query(std::string_view sql) {
 
     // ---------- 7. 执行 ----------
 
-    ExecutionContext ctx(database_.GetCatalog(), database_.GetStorageManager(), database_.GetThreadPool(),
-                         query_arena_);
+    ExecutionContext ctx(database_.GetCatalog(), database_.GetStorageManager(), database_.GetThreadPool(), query_memory,
+                         database_.GetBufferPool());
 
     // 执行模式来自 DatabaseConfig：可在运行期切换单线程 / 多线程
     ctx.execution_mode = database_.GetConfig().execution_mode;
@@ -71,8 +77,11 @@ QueryResult Connection::Query(std::string_view sql) {
     result.BuildResultMetadata(*statement, *bound);
 
     // 执行：每个产出的 batch 通过 Append 深拷贝进结果
-    const ExecutionResult execution_result = engine.Execute(
-        *physical, [&](const VectorBatch& batch, const ExecSchema& /*schema*/) { result.Append(batch); });
+    // （结果 chunk 的 owned buffer 从 Database 的 BufferPool 分配）
+    const ExecutionResult execution_result =
+        engine.Execute(*physical, [&](const VectorBatch& batch, const ExecSchema& /*schema*/) {
+            result.Append(batch, &database_.GetBufferPool());
+        });
 
     // 命令计划（INSERT / CREATE_TABLE）：受影响行数由执行结果给出
     if (execution_result.type == ExecutionResultType::COMMAND) {
@@ -81,7 +90,9 @@ QueryResult Connection::Query(std::string_view sql) {
 
     // ---------- 8. 查询收尾 ----------
 
-    query_arena_.Reset();
+    // 不再显式 Reset：Query 返回时
+    //   ExecutionEngine -> ExecutionContext -> QueryMemoryContext
+    //   -> Arena 析构 -> BlockPool::Release()，由 RAII 完成。
 
     return result;
 }

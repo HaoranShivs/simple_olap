@@ -35,13 +35,14 @@ class QueryResult {
 
     // 追加一个 batch：深拷贝各列数据（batch 可能是视图，回调返回后即失效，
     // 必须物化），同时累加 affected_rows 作为总行数。
-    void Append(const VectorBatch& batch) {
-        VectorBatch copy(/*is_view=*/false);
+    // buffer_pool：结果 chunk 的 owned buffer 从此池分配；
+    // BufferPool（Database 成员）比 QueryResult 活得久，跨 Query 持有安全。
+    void Append(const VectorBatch& batch, BufferPool* buffer_pool) {
+        VectorBatch copy(buffer_pool, /*is_view=*/false);
 
         copy.columns.reserve(batch.columns.size());
         for (const auto& col : batch.columns) {
-            ColumnData column;
-            column.type = col.type;
+            ColumnData column(col.type, buffer_pool);
             column.count = col.count;
             column.CopyFrom(col.buffer, col.count, /*is_view=*/false);
             copy.columns.push_back(std::move(column));

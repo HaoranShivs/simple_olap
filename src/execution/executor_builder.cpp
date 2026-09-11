@@ -246,8 +246,9 @@ BuiltExecutor ExecutorBuilder::BuildProject(const PhysicalProject& plan, const E
         output_schema.push_back(std::move(slot));
     }
 
-    return BuiltExecutor{std::make_unique<ProjectionOperator>(std::move(child.root), std::move(expressions)),
-                         std::move(output_schema)};
+    return BuiltExecutor{
+        std::make_unique<ProjectionOperator>(std::move(child.root), std::move(expressions), ctx_->buffer_pool),
+        std::move(output_schema)};
 }
 
 BuiltExecutor ExecutorBuilder::BuildHashAggregate(const PhysicalHashAggregate& plan,
@@ -255,8 +256,10 @@ BuiltExecutor ExecutorBuilder::BuildHashAggregate(const PhysicalHashAggregate& p
     BuiltExecutor child = BuildNode(plan.GetChild(), options);
     BuiltAggregateSpec spec = BuildAggregateSpec(plan, child.output_schema);
 
+    // 聚合状态进入 coordinator Arena（PMR）；输出 batch 绑定 BufferPool。
     return BuiltExecutor{std::make_unique<HashAggregateOperator>(std::move(child.root), std::move(spec.group_exprs),
-                                                                 std::move(spec.agg_calls), std::move(spec.outputs)),
+                                                                 std::move(spec.agg_calls), std::move(spec.outputs),
+                                                                 &ctx_->memory->CoordinatorArena(), ctx_->buffer_pool),
                          std::move(spec.output_schema)};
 }
 

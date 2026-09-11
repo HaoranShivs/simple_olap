@@ -2,7 +2,6 @@
 
 #include <string_view>
 
-#include "../memory/arena/arena.h"
 #include "database.h"
 #include "query_result.h"
 
@@ -23,10 +22,7 @@ class Connection {
     }
 
   private:
-    Database& database_; // 所属数据库（Catalog / StorageManager 的持有者）
-
-    // 单次查询的临时内存池，Query 返回后随 Connection 一同释放。
-    Arena query_arena_;
+    Database& database_; // 所属数据库（Catalog / StorageManager / 内存池的持有者）
 };
 
 } // namespace simple_olap

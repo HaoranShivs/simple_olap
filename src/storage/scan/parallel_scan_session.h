@@ -35,7 +35,7 @@ class TableStorage;
 class ParallelScanSession final : public BatchStream {
   public:
     ParallelScanSession(TableStorage* table, std::vector<SegmentId> segment_ids, ScanOptions options,
-                        size_t scan_threads, size_t queue_capacity);
+                        size_t scan_threads, size_t queue_capacity, BufferPool* buffer_pool);
 
     ~ParallelScanSession() override;
 
@@ -57,6 +57,10 @@ class ParallelScanSession final : public BatchStream {
     void ScanWorkerLoop();
 
     TableStorage* table_;
+
+    // scan worker 产出的 VectorBatch 绑定此 BufferPool；
+    // BufferHandle 随 batch move 进队列，最终由消费方归还。
+    BufferPool* buffer_pool_ = nullptr;
 
     BoundedBlockingQueue<VectorBatch> queue_;
 

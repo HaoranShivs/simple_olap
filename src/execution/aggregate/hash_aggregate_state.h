@@ -1,6 +1,8 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
+#include <memory_resource>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -32,12 +34,19 @@ struct AggregateOutputSpec {
 
 // 聚合中间态与算法：与 Operator 外壳（HashAggregateOperator）解耦，
 // 串行路径与并行 worker 共用同一份实现。
+//
+// 内存归属：所有 PMR 容器（GroupTable / GroupKey / StateVector）都从
+// 构造时传入的 memory_resource（Arena）分配。worker 状态用 worker Arena，
+// 全局状态用 coordinator Arena；Merge 时把 worker key 拷贝进 coordinator
+// Arena，两个 Arena 完全解耦。
 class HashAggregateState {
   public:
     // ---- 聚合中间态类型（跨线程传递部分 group 表时使用） ----
     // 一个分组键：各 GROUP BY 表达式的求值结果。
     struct GroupKey {
-        std::vector<ExecValue> values;
+        explicit GroupKey(std::pmr::memory_resource* resource) : values(resource) {}
+
+        std::pmr::vector<ExecValue> values;
 
         bool operator==(const GroupKey& other) const {
             return values == other.values;
@@ -58,12 +67,14 @@ class HashAggregateState {
         ExecValue max_value = int32_t{0};
     };
 
-    using StateVector = std::vector<AggState>; // 一个 group 的各聚合中间态
-    using GroupTable = std::unordered_map<GroupKey, StateVector, GroupKeyHash>;
+    using StateVector = std::pmr::vector<AggState>; // 一个 group 的各聚合中间态
+    using GroupTable = std::pmr::unordered_map<GroupKey, StateVector, GroupKeyHash>;
 
-    // group_exprs / agg_calls 由调用方保证比 state 活得久（计划树持有）
-    HashAggregateState(const std::vector<ExecExprPtr>* group_exprs, const std::vector<AggCallSpec>* agg_calls)
-        : group_exprs_(group_exprs), agg_calls_(agg_calls) {}
+    // group_exprs / agg_calls 由调用方保证比 state 活得久（计划树持有）。
+    // memory 为 PMR 资源（Arena），必须比 state 活得久。
+    HashAggregateState(const std::vector<ExecExprPtr>* group_exprs, const std::vector<AggCallSpec>* agg_calls,
+                       std::pmr::memory_resource* memory)
+        : group_exprs_(group_exprs), agg_calls_(agg_calls), memory_(memory), groups_(memory) {}
 
     HashAggregateState(HashAggregateState&& other) noexcept = default;
     HashAggregateState& operator=(HashAggregateState&& other) noexcept = default;
@@ -87,7 +98,7 @@ class HashAggregateState {
     // 保证空输入时也能产出一个（空聚合值的）结果行。
     void EnsureGlobalGroup() {
         if (group_exprs_->empty()) {
-            groups_.try_emplace(GroupKey{}, MakeStates());
+            groups_.try_emplace(GroupKey(memory_), MakeStates());
         }
     }
 
@@ -110,6 +121,9 @@ class HashAggregateState {
     const std::vector<ExecExprPtr>* group_exprs_ = nullptr;
     const std::vector<AggCallSpec>* agg_calls_ = nullptr;
     const std::vector<AggregateOutputSpec>* outputs_ = nullptr;
+
+    // PMR 资源（Arena）：GroupTable / GroupKey / StateVector 的分配来源。
+    std::pmr::memory_resource* memory_ = nullptr;
 
     GroupTable groups_;
     GroupTable::iterator emit_it_{};

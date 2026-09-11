@@ -17,8 +17,14 @@ struct DatabaseConfig {
         return n == 0 ? 1 : static_cast<size_t>(n);
     }();
 
-    // 查询内存池的初始大小。
-    size_t query_arena_initial_size = 1 << 20; // 1 MB
+    // Arena block 大小（传给 BlockPool）。
+    size_t arena_block_size = 1 << 20; // 1 MB
+
+    // BlockPool freelist 缓存上限。
+    size_t block_pool_max_cached_blocks = 64;
+
+    // BufferPool 每个 size class 的缓存上限。
+    size_t buffer_pool_max_cached_per_class = 64;
 
     // 默认执行模式：由 Connection 注入到每条语句的 ExecutionContext。
     // 可在运行期切换以对比同一 SQL 的单线程 / 多线程执行。

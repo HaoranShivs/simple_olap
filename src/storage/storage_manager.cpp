@@ -4,7 +4,8 @@
 
 namespace simple_olap {
 
-StorageManager::StorageManager(std::filesystem::path db_path) : root_path_(std::move(db_path)) {
+StorageManager::StorageManager(std::filesystem::path db_path, BufferPool* buffer_pool)
+    : root_path_(std::move(db_path)), buffer_pool_(buffer_pool) {
     // 数据库根目录必须已存在（由 Database 负责创建）；tables/ 子目录按需创建
 }
 
@@ -26,7 +27,7 @@ std::shared_ptr<TableStorage> StorageManager::GetTable(TableId table_id, const T
 
     // 2. 从硬盘打开（table.meta 中记录 segment 布局）；
     //    schema 由调用方从 Catalog 取出后传入（StorageManager 不感知 Catalog）
-    auto storage = TableStorage::Open(table_id, schema, TablesRoot());
+    auto storage = TableStorage::Open(table_id, schema, TablesRoot(), buffer_pool_);
     if (storage == nullptr) {
         return nullptr;
     }
@@ -42,7 +43,7 @@ std::shared_ptr<TableStorage> StorageManager::CreateTable(TableId table_id, cons
         return nullptr;
     }
 
-    auto storage = TableStorage::Create(table_id, schema, TablesRoot());
+    auto storage = TableStorage::Create(table_id, schema, TablesRoot(), buffer_pool_);
     if (storage == nullptr) {
         return nullptr;
     }

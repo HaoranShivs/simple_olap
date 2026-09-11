@@ -125,20 +125,24 @@ ExecutionResult ParallelExecutor::ExecuteAggregate(const PhysicalHashAggregate& 
     futures.reserve(worker_count);
 
     try {
-        for (size_t i = 0; i < worker_count; ++i) {
-            futures.push_back(
-                compute_pool_->Submit([&builder, &child_plan, &build_options, &spec]() -> HashAggregateState {
+        for (size_t worker_id = 0; worker_id < worker_count; ++worker_id) {
+            futures.push_back(compute_pool_->Submit(
+                [&builder, &child_plan, &build_options, &spec, this, worker_id]() -> HashAggregateState {
                     // 每条 pipeline：SeqScan(共享 BatchStream) -> Filter -> Projection，
                     // 聚合由 worker 本地的 HashAggregateState::Consume() 完成
                     BuiltExecutor pipeline = builder.Build(child_plan, build_options);
                     pipeline.root->Init();
 
-                    HashAggregateState local(&spec.group_exprs, &spec.agg_calls);
+                    // worker 本地聚合状态进入本 worker 专属 Arena（PMR）。
+                    // Arena 地址在 Query 生命周期内稳定，future move 安全。
+                    Arena& arena = ctx_->memory->WorkerArena(worker_id);
+
+                    HashAggregateState local(&spec.group_exprs, &spec.agg_calls, &arena);
                     local.set_outputs(&spec.outputs);
                     // 无 GROUP BY：即使本 worker 没分到数据也要产出全局空组
                     local.EnsureGlobalGroup();
 
-                    VectorBatch batch;
+                    VectorBatch batch(ctx_->buffer_pool);
                     while (pipeline.root->Next(batch)) {
                         if (ActiveRowCount(batch) > 0) {
                             local.Consume(batch);
@@ -166,7 +170,9 @@ ExecutionResult ParallelExecutor::ExecuteAggregate(const PhysicalHashAggregate& 
     // 7. 收集 future 并 Merge 进 global_state。
     //    即使某个 worker 抛异常，也要把所有 future 收完再上抛，
     //    否则 worker 线程可能仍引用本函数栈上的 spec。
-    HashAggregateState global(&spec.group_exprs, &spec.agg_calls);
+    // 全局聚合状态进入 coordinator Arena（PMR）
+    Arena& coordinator_arena = ctx_->memory->CoordinatorArena();
+    HashAggregateState global(&spec.group_exprs, &spec.agg_calls, &coordinator_arena);
     global.set_outputs(&spec.outputs);
     global.EnsureGlobalGroup();
 
@@ -191,7 +197,7 @@ ExecutionResult ParallelExecutor::ExecuteAggregate(const PhysicalHashAggregate& 
     result.type = ExecutionResultType::QUERY;
     result.schema = spec.output_schema;
 
-    VectorBatch output;
+    VectorBatch output(ctx_->buffer_pool);
     while (global.NextResult(output)) {
         const uint32_t active_rows = ActiveRowCount(output);
         if (active_rows == 0) {
@@ -260,14 +266,14 @@ ExecutionResult ParallelExecutor::ExecuteQuery(const PhysicalPlan& plan, const B
     futures.reserve(worker_count);
 
     try {
-        for (size_t i = 0; i < worker_count; ++i) {
-            futures.push_back(
-                compute_pool_->Submit([&builder, &plan, &build_options, &results, &active_workers]() -> void {
+        for (size_t worker_id = 0; worker_id < worker_count; ++worker_id) {
+            futures.push_back(compute_pool_->Submit(
+                [&builder, &plan, &build_options, &results, &active_workers, this, worker_id]() -> void {
                     try {
                         BuiltExecutor pipeline = builder.Build(plan, build_options);
                         pipeline.root->Init();
 
-                        VectorBatch batch;
+                        VectorBatch batch(ctx_->buffer_pool);
                         while (pipeline.root->Next(batch)) {
                             if (ActiveRowCount(batch) > 0) {
                                 // 队列满时阻塞（背压）；Cancel/Abort 后 Push 返回 false
@@ -275,7 +281,7 @@ ExecutionResult ParallelExecutor::ExecuteQuery(const PhysicalPlan& plan, const B
                                     return;
                                 }
                             }
-                            batch = VectorBatch{};
+                            batch = VectorBatch{ctx_->buffer_pool};
                         }
                     } catch (...) {
                         // 处理异常：唤醒消费侧，并唤醒其他阻塞在 Push 上的 worker
@@ -309,11 +315,11 @@ ExecutionResult ParallelExecutor::ExecuteQuery(const PhysicalPlan& plan, const B
     result.type = ExecutionResultType::QUERY;
     result.schema = output_schema;
 
-    VectorBatch output;
+    VectorBatch output(ctx_->buffer_pool);
     while (results.Pop(output)) {
         const uint32_t active_rows = ActiveRowCount(output);
         if (active_rows == 0) {
-            output = VectorBatch{};
+            output = VectorBatch{ctx_->buffer_pool};
             continue;
         }
 
@@ -322,7 +328,7 @@ ExecutionResult ParallelExecutor::ExecuteQuery(const PhysicalPlan& plan, const B
         if (consumer) {
             consumer(output, result.schema);
         }
-        output = VectorBatch{};
+        output = VectorBatch{ctx_->buffer_pool};
     }
 
     // 7. 收集异常，并 join 所有 worker（它们在读取本栈上的 builder/plan/results）

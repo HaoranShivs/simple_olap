@@ -5,6 +5,8 @@
 #include <string_view>
 
 #include "../catalog/catalog.h"
+#include "../memory/block_pool/block_pool.h"
+#include "../memory/buffer_pool/buffer_pool.h"
 #include "../parallel/thread_pool/thread_pool.h"
 #include "../sql/ast/statement.h"
 #include "../storage/storage_manager.h"
@@ -45,6 +47,14 @@ class Database {
         return thread_pool_;
     }
 
+    BlockPool& GetBlockPool() {
+        return block_pool_;
+    }
+
+    BufferPool& GetBufferPool() {
+        return buffer_pool_;
+    }
+
     const DatabaseConfig& GetConfig() const {
         return config_;
     }
@@ -77,6 +87,11 @@ class Database {
   private:
     std::filesystem::path path_; // 数据库根目录
     DatabaseConfig config_;
+
+    // 内存池：必须比 QueryMemoryContext / VectorBatch / ParallelScanSession 活得更久。
+    // 注意成员初始化顺序：block_pool_ / buffer_pool_ 在 storage_manager_ 之前构造。
+    BlockPool block_pool_;
+    BufferPool buffer_pool_;
 
     // 以下三者平级：逻辑元数据 / 物理存储 / 执行线程池。
     Catalog catalog_;

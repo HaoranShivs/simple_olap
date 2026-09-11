@@ -1,9 +1,11 @@
 #pragma once
 
 #include <memory>
+#include <memory_resource>
 #include <vector>
 
 #include "../operator.h"
+#include "../vector/vector.h"
 #include "hash_aggregate_state.h"
 
 namespace simple_olap {
@@ -18,10 +20,13 @@ namespace simple_olap {
 // 而是直接为每个 worker 构造独立的 HashAggregateState。
 class HashAggregateOperator final : public Operator {
   public:
+    // memory：PMR 资源（coordinator Arena），必须比本算子活得久。
+    // buffer_pool：input_ 批次的 buffer 池。
     HashAggregateOperator(std::unique_ptr<Operator> child, std::vector<ExecExprPtr> group_exprs,
-                          std::vector<AggCallSpec> agg_calls, std::vector<AggregateOutputSpec> outputs)
+                          std::vector<AggCallSpec> agg_calls, std::vector<AggregateOutputSpec> outputs,
+                          std::pmr::memory_resource* memory, BufferPool* buffer_pool)
         : child_(std::move(child)), group_exprs_(std::move(group_exprs)), agg_calls_(std::move(agg_calls)),
-          outputs_(std::move(outputs)), state_(&group_exprs_, &agg_calls_) {
+          outputs_(std::move(outputs)), state_(&group_exprs_, &agg_calls_, memory), input_(buffer_pool, true) {
         state_.set_outputs(&outputs_);
     }
 
@@ -35,7 +40,7 @@ class HashAggregateOperator final : public Operator {
     std::vector<AggregateOutputSpec> outputs_;
 
     HashAggregateState state_;
-    VectorBatch input_{true};
+    VectorBatch input_;
     bool consumed_ = false;
 };
 
