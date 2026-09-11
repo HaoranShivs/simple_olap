@@ -7,136 +7,9 @@
 
 #include "../../execution/vector/vector.h"
 #include "../scan/parallel_scan_session.h"
+#include "../scan/row_filter.h"
 
 namespace simple_olap {
-namespace {
-// 按行读取列值并转为 double，供 where 行级过滤比较；非数值类型返回 false
-bool ColumnValueAsDouble(const ColumnData& col, uint32_t row, double& out) {
-    switch (col.type) {
-    case DataType::INT32:
-        out = static_cast<double>(col.data<int32_t>()[row]);
-        return true;
-    case DataType::INT64:
-        out = static_cast<double>(col.data<int64_t>()[row]);
-        return true;
-    case DataType::FLOAT:
-        out = static_cast<double>(col.data<float>()[row]);
-        return true;
-    case DataType::DOUBLE:
-        out = col.data<double>()[row];
-        return true;
-    default:
-        return false;
-    }
-}
-
-// 标量比较：lhs op rhs
-bool CompareDouble(double lhs, CmpOp op, double rhs) {
-    switch (op) {
-    case CmpOp::EQ:
-        return lhs == rhs;
-    case CmpOp::NE:
-        return lhs != rhs;
-    case CmpOp::GT:
-        return lhs > rhs;
-    case CmpOp::GE:
-        return lhs >= rhs;
-    case CmpOp::LT:
-        return lhs < rhs;
-    case CmpOp::LE:
-        return lhs <= rhs;
-    }
-    return false;
-}
-
-// 从 Condition 的 variant 值中提取 double（仅数值；字符串返回 false）
-bool ColumnValueAsDoubleFromVariant(const std::variant<int32_t, int64_t, double, std::string>& value, double& out) {
-    if (std::holds_alternative<int32_t>(value)) {
-        out = static_cast<double>(std::get<int32_t>(value));
-        return true;
-    }
-    if (std::holds_alternative<int64_t>(value)) {
-        out = static_cast<double>(std::get<int64_t>(value));
-        return true;
-    }
-    if (std::holds_alternative<double>(value)) {
-        out = std::get<double>(value);
-        return true;
-    }
-    return false;
-}
-
-// 行级精确判断单个 predicate：lhs op rhs。
-// 一个 predicate 一旦进入 Storage，就意味着 Optimizer 已承诺 Storage 可精确执行。
-bool EvaluateCondition(const ColumnData& column, uint32_t row, const Condition& cond) {
-    double lhs = 0.0;
-    double rhs = 0.0;
-
-    if (!ColumnValueAsDouble(column, row, lhs)) {
-        throw std::runtime_error("pushed predicate contains unsupported column type");
-    }
-
-    if (!ColumnValueAsDoubleFromVariant(cond.value, rhs)) {
-        throw std::runtime_error("pushed predicate contains unsupported literal type");
-    }
-
-    return CompareDouble(lhs, cond.op, rhs);
-}
-
-// 多 predicate 行过滤：按 predicate 逐个收缩 selection vector。
-// 好处：predicate A 把 1024 行过滤到 50 行后，predicate B 只需执行 50 次。
-void ApplyRowPredicates(const ScanOptions& options, const std::vector<uint8_t>& row_filter_mask, VectorBatch& output) {
-    const uint32_t physical_rows = output.size;
-
-    std::vector<uint32_t> selection;
-    selection.reserve(physical_rows);
-
-    for (uint32_t row = 0; row < physical_rows; ++row) {
-        selection.push_back(row);
-    }
-
-    for (size_t p = 0; p < options.predicates.size(); ++p) {
-        // metadata 已经证明这个 predicate 对整个 segment ALL_MATCH，跳过
-        if (!row_filter_mask[p]) {
-            continue;
-        }
-
-        const Condition& cond = options.predicates[p];
-
-        // 定位 predicate 列在 output 中的下标
-        const auto it = std::find(options.columns.begin(), options.columns.end(), cond.column);
-        if (it == options.columns.end()) {
-            throw std::runtime_error("predicate column is not scanned");
-        }
-
-        const size_t slot = static_cast<size_t>(it - options.columns.begin());
-        const ColumnData& column = output.columns[slot];
-
-        size_t write = 0;
-        for (size_t read = 0; read < selection.size(); ++read) {
-            const uint32_t row = selection[read];
-            if (EvaluateCondition(column, row, cond)) {
-                selection[write++] = row;
-            }
-        }
-        selection.resize(write);
-
-        if (selection.empty()) {
-            break;
-        }
-    }
-
-    if (selection.size() == physical_rows) {
-        // identity selection：全部行通过，无需 sel_vector
-        output.sel_vector.clear();
-        output.size = physical_rows;
-        return;
-    }
-
-    output.sel_vector = std::move(selection);
-    output.size = static_cast<uint32_t>(output.sel_vector.size());
-}
-} // namespace
 
 // ---------- 创建 / 打开 ----------
 
@@ -304,6 +177,11 @@ void TableStorage::CreateActiveSegment() {
 
 // ---------- 读路径 ----------
 
+std::shared_ptr<const PreparedScanPredicates> TableStorage::PrepareScanPredicates(const ScanOptions& options) const {
+    // schema_ 的权威来源在 Catalog，生命周期覆盖本表。
+    return std::make_shared<const PreparedScanPredicates>(PreparedScanPredicates::Build(options, *schema_));
+}
+
 bool TableStorage::AdvanceCursorToNextSegment(ScanCursor& cursor) {
     // segment_id 是 metadata_.segment_ids 的下标，进度保存在游标自身。
     // 首次调用把哨兵值提升为 0，之后逐 1 前进，耗尽返回 false。
@@ -383,7 +261,8 @@ bool TableStorage::ScanSegment(SegmentId segment_id, const ScanOptions& options,
 
     // 非常重要：
     // cursor 必须按“扫描的物理行数”前进，而不是过滤后的有效行数。
-    cursor.offset += output.size;
+    const uint32_t physical_rows = output.size;
+    cursor.offset += physical_rows;
 
     // =====================================
     // 第三层：只有 metadata 无法决定的 predicate 才 row filter
@@ -397,7 +276,13 @@ bool TableStorage::ScanSegment(SegmentId segment_id, const ScanOptions& options,
     }
 
     if (need_row_filter) {
-        ApplyRowPredicates(options, cursor.row_filter_mask, output);
+        if (cursor.prepared_predicates == nullptr) {
+            // 调用方（Scan / ParallelScanSession）必须提前准备谓词计划
+            throw std::runtime_error("scan predicates not prepared before ScanSegment");
+        }
+
+        // SIMD/scalar 类型化比较 -> SelectionMask AND -> sel_vector
+        StorageRowFilter::Apply(*cursor.prepared_predicates, cursor.row_filter_mask, output);
 
         if (output.size == 0) {
             // 本批全部被过滤：调用方继续读下一批
@@ -414,6 +299,11 @@ bool TableStorage::ScanSegment(SegmentId segment_id, const ScanOptions& options,
 bool TableStorage::Scan(const ScanOptions& options, ScanCursor& cursor, VectorBatch& output) {
     const auto& segment_ids = metadata_.segment_ids;
 
+    // 惰性准备：第一次 Scan 时 Build 一次，之后所有 batch / segment 复用。
+    if (cursor.prepared_predicates == nullptr && !options.predicates.empty()) {
+        cursor.prepared_predicates = PrepareScanPredicates(options);
+    }
+
     while (1) {
         if (cursor.segment_id == kInvalidSegmentId) {
             if (!AdvanceCursorToNextSegment(cursor)) {
@@ -428,6 +318,7 @@ bool TableStorage::Scan(const ScanOptions& options, ScanCursor& cursor, VectorBa
         segment_cursor.offset = cursor.offset_in_segment;
         segment_cursor.decision_valid = cursor.segment_decision_valid;
         segment_cursor.row_filter_mask = cursor.row_filter_mask;
+        segment_cursor.prepared_predicates = cursor.prepared_predicates.get();
 
         const bool got = ScanSegment(seg_id, options, segment_cursor, output);
 
@@ -461,9 +352,14 @@ bool TableStorage::Scan(const ScanOptions& options, ScanCursor& cursor, VectorBa
 
 std::shared_ptr<BatchStream> TableStorage::CreateParallelScan(const ScanOptions& options, size_t scan_threads,
                                                               size_t queue_capacity) {
-    // 已落盘 segment 的 id 列表是本次并行扫描的完整输入
-    return std::make_shared<ParallelScanSession>(this, metadata_.segment_ids, options, scan_threads, queue_capacity,
-                                                 buffer_pool_);
+    // 谓词计划只准备一次，所有 scan worker 只读共享。
+    std::shared_ptr<const PreparedScanPredicates> prepared;
+    if (!options.predicates.empty()) {
+        prepared = PrepareScanPredicates(options);
+    }
+
+    return std::make_shared<ParallelScanSession>(this, metadata_.segment_ids, options, std::move(prepared),
+                                                 scan_threads, queue_capacity, buffer_pool_);
 }
 
 } // namespace simple_olap

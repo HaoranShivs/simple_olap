@@ -7,9 +7,10 @@
 namespace simple_olap {
 
 ParallelScanSession::ParallelScanSession(TableStorage* table, std::vector<SegmentId> segment_ids, ScanOptions options,
-                                         size_t scan_threads, size_t queue_capacity, BufferPool* buffer_pool)
+                                         std::shared_ptr<const PreparedScanPredicates> prepared, size_t scan_threads,
+                                         size_t queue_capacity, BufferPool* buffer_pool)
     : table_(table), buffer_pool_(buffer_pool), queue_(queue_capacity), segment_ids_(std::move(segment_ids)),
-      options_(std::move(options)), scan_pool_(scan_threads == 0 ? 1 : scan_threads) {}
+      options_(std::move(options)), prepared_(std::move(prepared)), scan_pool_(scan_threads == 0 ? 1 : scan_threads) {}
 
 ParallelScanSession::~ParallelScanSession() {
     // 兜底：唤醒所有阻塞在队列上的线程，再 join scan worker
@@ -68,6 +69,7 @@ void ParallelScanSession::ScanWorkerLoop() {
             const SegmentId id = segment_ids_[index];
 
             SegmentScanCursor cursor;
+            cursor.prepared_predicates = prepared_.get();
             // scan worker 产出的 batch 绑定 BufferPool：
             // BufferHandle 随 batch move 进队列，由消费方归还。
             VectorBatch batch(buffer_pool_);

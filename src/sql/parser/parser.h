@@ -37,8 +37,18 @@ class Parser {
 
     // ---------- 表达式解析 ----------
 
-    // 解析表达式，处理二元运算符的优先级与结合性。
+    // 解析表达式入口，处理二元运算符的优先级与结合性。
+    // 优先级由低到高：OR < AND < (比较/算术)。
     ExprPtr ParseExpression();
+
+    // 逻辑或：a OR b（优先级低于 AND）。
+    ExprPtr ParseOrExpression();
+
+    // 逻辑与：a AND b。
+    ExprPtr ParseAndExpression();
+
+    // 比较与算术运算：+ - = > <（简化版：同一层内不区分优先级）。
+    ExprPtr ParseComparisonExpression();
 
     // 解析原子表达式：字面量、列名、函数调用、括号子表达式。
     ExprPtr ParsePrimaryExpression();

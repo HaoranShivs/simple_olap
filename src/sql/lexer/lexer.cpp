@@ -175,6 +175,10 @@ Token Lexer::ReadIdentifierOrKeyword() {
         return Token{TokenType::VALUES, text, start};
     if (text == "AS")
         return Token{TokenType::AS, text, start};
+    if (text == "AND")
+        return Token{TokenType::AND, text, start};
+    if (text == "OR")
+        return Token{TokenType::OR, text, start};
 
     return Token{TokenType::IDENTIFIER, text, start};
 }

@@ -32,6 +32,20 @@ list(FILTER PROJECT_SOURCES EXCLUDE REGEX ".*/main\\.cpp$")
 # 不参与库构建
 list(FILTER PROJECT_SOURCES EXCLUDE REGEX ".*/main_test\\.cpp$")
 
+# ---------- SIMD：AVX2 源文件单独开启 -mavx2 ----------
+# 只对 src/simd/avx2/*.cpp 生效；其余代码不要求 AVX2 指令集，
+# 保证引擎在没有 AVX2 的 CPU 上也能构建与运行（运行时由 KernelRegistry
+# 通过 __builtin_cpu_supports 在 scalar / AVX2 backend 间选择）。
+file(GLOB AVX2_SOURCES CONFIGURE_DEPENDS
+    ${CMAKE_SOURCE_DIR}/src/simd/avx2/*.cpp)
+
+if(AVX2_SOURCES AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|i[3-6]86)$")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        set_source_files_properties(${AVX2_SOURCES}
+            PROPERTIES COMPILE_OPTIONS "-mavx2")
+    endif()
+endif()
+
 # ---------- 静态库：引擎核心 ----------
 # 并行执行（线程池 / 阻塞队列 / future）依赖 pthread
 find_package(Threads REQUIRED)
@@ -39,6 +53,11 @@ find_package(Threads REQUIRED)
 add_library(simple_olap_core STATIC ${PROJECT_SOURCES})
 target_include_directories(simple_olap_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(simple_olap_core PUBLIC Threads::Threads)
+
+# Release 优化：仅开 -O3。
+# 不使用 -march=native（会强制本机指令集）与 -ffast-math（改变浮点语义）。
+target_compile_options(simple_olap_core PRIVATE
+    $<$<CONFIG:Release>:-O3>)
 
 # ---------- 可执行：测试入口 ----------
 add_executable(simple_olap ${CMAKE_SOURCE_DIR}/src/main.cpp)

@@ -9,6 +9,7 @@
 #include "../../parallel/thread_pool/thread_pool.h"
 #include "../datastructs.h"
 #include "batch_stream.h"
+#include "storage_predicate.h"
 
 namespace simple_olap {
 
@@ -35,7 +36,8 @@ class TableStorage;
 class ParallelScanSession final : public BatchStream {
   public:
     ParallelScanSession(TableStorage* table, std::vector<SegmentId> segment_ids, ScanOptions options,
-                        size_t scan_threads, size_t queue_capacity, BufferPool* buffer_pool);
+                        std::shared_ptr<const PreparedScanPredicates> prepared, size_t scan_threads,
+                        size_t queue_capacity, BufferPool* buffer_pool);
 
     ~ParallelScanSession() override;
 
@@ -72,6 +74,10 @@ class ParallelScanSession final : public BatchStream {
     std::atomic<bool> started_{false};
 
     ScanOptions options_;
+
+    // 谓词计划：Build 一次，所有 scan worker 只读共享。
+    // 为空表示没有 pushed predicate，ScanSegment 不会做行过滤。
+    std::shared_ptr<const PreparedScanPredicates> prepared_;
 
     // storage scan pool：只服务本 session 的 scan worker
     ThreadPool scan_pool_;

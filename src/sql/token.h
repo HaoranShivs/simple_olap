@@ -51,7 +51,11 @@ enum class TokenType {
     PLUS,
     MINUS,
     MUL,
-    DIV
+    DIV,
+
+    // ---------- 逻辑运算符 ----------
+    AND, // 逻辑与
+    OR   // 逻辑或
 };
 
 // 已废弃：源码位置信息暂未实现。

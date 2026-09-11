@@ -62,6 +62,12 @@ std::unique_ptr<SelectStatement> Parser::ParseSelect() {
     // 5. 语句结束（可选分号）
     Match(TokenType::SEMICOLON);
 
+    // 拒绝多余 Token：此前不支持的语法（如缺失的 AND/OR、>=）会被静默
+    // 丢弃，导致按「只应用第一个条件」返回错误结果。这里改为显式报错。
+    if (Peek().type != TokenType::END) {
+        throw std::runtime_error("Unexpected token after SELECT statement: " + Peek().text);
+    }
+
     return stmt;
 }
 
@@ -203,9 +209,40 @@ DataType Parser::ParseDataType() {
 // ============================================================
 
 ExprPtr Parser::ParseExpression() {
+    // 表达式入口：优先级最低的逻辑或。
+    return ParseOrExpression();
+}
+
+// 逻辑或：a OR b（优先级低于 AND，左结合）
+ExprPtr Parser::ParseOrExpression() {
+    ExprPtr left = ParseAndExpression();
+
+    while (Peek().type == TokenType::OR) {
+        Consume();
+        ExprPtr right = ParseAndExpression();
+        left = std::make_unique<BinaryOpExpr>(BinaryOpExpr::OpType::OR, std::move(left), std::move(right));
+    }
+
+    return left;
+}
+
+// 逻辑与：a AND b（左结合）
+ExprPtr Parser::ParseAndExpression() {
+    ExprPtr left = ParseComparisonExpression();
+
+    while (Peek().type == TokenType::AND) {
+        Consume();
+        ExprPtr right = ParseComparisonExpression();
+        left = std::make_unique<BinaryOpExpr>(BinaryOpExpr::OpType::AND, std::move(left), std::move(right));
+    }
+
+    return left;
+}
+
+// 比较/算术运算层（简化版：同一层内不区分优先级，后续可拆分为多层）
+ExprPtr Parser::ParseComparisonExpression() {
     ExprPtr left = ParsePrimaryExpression();
 
-    // 二元运算符（简化版：不区分优先级，后续可拆分为多层）
     while (true) {
         TokenType type = Peek().type;
         std::optional<BinaryOpExpr::OpType> op;

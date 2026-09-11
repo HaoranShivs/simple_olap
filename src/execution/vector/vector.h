@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../../common/constants.h"
 #include "../../memory/buffer_pool/buffer_pool.h"
 #include "../../type.h"
 #include <cstdint>
@@ -80,7 +81,7 @@ class VectorBatch {
   public:
     explicit VectorBatch(BufferPool* buffer_pool = nullptr, bool is_view = true);
 
-    static constexpr uint32_t BATCH_SIZE = 1024;
+    static constexpr uint32_t BATCH_SIZE = kVectorBatchSize;
 
     // ---------- 公共成员 ----------
 

@@ -4,6 +4,7 @@
 #include "serialization.h"
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -11,6 +12,10 @@
 
 namespace simple_olap {
 // TableId / ColumnId / SegmentId 已上移至 type.h（公共层），此处不再重复定义
+
+// 前置声明：谓词准备结果（定义见 scan/storage_predicate.h）。
+// 游标只持有指向它的只读句柄，避免此处引入 simd / scan 依赖。
+class PreparedScanPredicates;
 
 // 单个 segment 的最大行数，活跃 segment 达到该行数后自动封存
 constexpr uint32_t kMaxSegmentRowCount = 65536;
@@ -40,6 +45,11 @@ struct ScanCursor {
     //   0: metadata 已证明全部满足（ALL_MATCH），行级不再判断
     std::vector<uint8_t> row_filter_mask;
 
+    // 谓词准备结果：ColumnId->slot、typed literal binding 只做一次。
+    // 第一次 Scan 时惰性 Build，之后所有 batch / segment 复用同一份不可变计划。
+    // 并行扫描由 ParallelScanSession 构建一次后共享。
+    std::shared_ptr<const PreparedScanPredicates> prepared_predicates;
+
     // 进入下一个 segment 时统一调用
     void AdvanceSegment() {
         segment_id += 1;
@@ -62,6 +72,10 @@ struct SegmentScanCursor {
     //   1: 该 predicate 需要逐行精确执行（NEED_FILTER）
     //   0: metadata 已证明全部满足（ALL_MATCH）
     std::vector<uint8_t> row_filter_mask;
+
+    // 由调用方（串行 ScanCursor / ParallelScanSession）提供的只读谓词计划。
+    // 生命周期由调用方保证覆盖本次 ScanSegment 调用。
+    const PreparedScanPredicates* prepared_predicates = nullptr;
 };
 
 struct Condition {

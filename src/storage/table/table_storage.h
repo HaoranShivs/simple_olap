@@ -11,6 +11,7 @@
 #include "../datachunk.h"
 #include "../datastructs.h"
 #include "../scan/batch_stream.h"
+#include "../scan/storage_predicate.h"
 #include "../scan_request.h"
 #include "../segment/segment.h"
 #include "table_storage_meta.h"
@@ -56,6 +57,13 @@ class TableStorage {
 
     // 跨 segment 扫描：由 cursor 记录推进位置，输出一个 VectorBatch
     bool Scan(const ScanOptions& options, ScanCursor& cursor, VectorBatch& output);
+
+    // 一次性准备 ScanOptions 中的 pushed predicate：
+    //   - ColumnId -> output.columns 下标
+    //   - literal typed binding
+    // 返回的不可变对象可由串行 cursor 缓存或并行 scan worker 共享，
+    // 热路径（每个 batch）不再重复准备。
+    std::shared_ptr<const PreparedScanPredicates> PrepareScanPredicates(const ScanOptions& options) const;
 
     // 单 segment 扫描：只读取指定 segment 内 [cursor.offset, ...) 的数据，
     // 绝不推进到其他 segment。metadata pruning / batch 读取 / row filtering
