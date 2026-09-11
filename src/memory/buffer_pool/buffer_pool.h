@@ -106,7 +106,8 @@ class BufferPool {
     static constexpr size_t kClassCount = 5;
     static constexpr std::array<size_t, kClassCount> SIZE_CLASSES{4 << 10, 8 << 10, 16 << 10, 32 << 10, 64 << 10};
 
-    std::array<FreeList, kClassCount> free_lists_;
+    // {} 值初始化：每个 FreeList 的 vector 为空、mutex 未锁。
+    std::array<FreeList, kClassCount> free_lists_{};
 
     size_t max_cached_per_class_;
 
