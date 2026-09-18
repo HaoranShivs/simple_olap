@@ -212,21 +212,21 @@ class LogicalInsert final : public LogicalPlan {
 
 class LogicalCreateTable final : public LogicalPlan {
   public:
-    LogicalCreateTable(std::string table_name, std::vector<BoundColumnDef> columns)
-        : LogicalPlan(Type::CREATE_TABLE), table_name_(std::move(table_name)), columns_(std::move(columns)) {}
+    LogicalCreateTable(std::string table_name, TableSchema schema)
+        : LogicalPlan(Type::CREATE_TABLE), table_name_(std::move(table_name)), schema_(std::move(schema)) {}
 
     const std::string& GetTableName() const {
         return table_name_;
     }
-    const std::vector<BoundColumnDef>& GetColumns() const {
-        return columns_;
+    const TableSchema& GetSchema() const {
+        return schema_;
     }
 
     std::string ToString(size_t indent = 0) const override;
 
   private:
     std::string table_name_;
-    std::vector<BoundColumnDef> columns_;
+    TableSchema schema_;
 };
 
 } // namespace simple_olap

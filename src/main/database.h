@@ -8,7 +8,6 @@
 #include "../memory/block_pool/block_pool.h"
 #include "../memory/buffer_pool/buffer_pool.h"
 #include "../parallel/thread_pool/thread_pool.h"
-#include "../sql/ast/statement.h"
 #include "../storage/storage_manager.h"
 #include "execution_context.h" // DatabaseConfig
 
@@ -74,8 +73,9 @@ class Database {
 
     // ---------- DDL 协调（Catalog 与 StorageManager 的唯一交汇处） ----------
 
-    // 创建表：先在 Catalog 登记元数据，再创建物理存储
-    bool CreateTable(const CreateTableStatement& stmt);
+    // 创建表：先在 Catalog 登记元数据，再创建物理存储。
+    // schema 已由 Binder 校验并完成 column_id / 键绑定。
+    bool CreateTable(const std::string& table_name, const TableSchema& schema);
 
     // 删除表：先删 Catalog 条目，再由 StorageManager 标记删除物理目录
     bool DropTable(std::string_view table_name);

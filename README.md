@@ -18,6 +18,7 @@ simple_olap/
 │   ├── storage/              # 存储引擎（列式）
 │   │   ├── table/            # 表：schema、元数据、segment 集合
 │   │   ├── segment/          # 数据分段：按行范围切分的存储单元
+│   │   ├── index/            # 键索引：主键唯一性校验与二级键等值点查
 │   │   ├── column_chunk/     # 列块：segment 内单列的连续存储
 │   │   ├── encoding/         # 编码压缩：RLE、字典、Delta 等
 │   │   └── file/             # 文件格式：列式文件布局与读写
@@ -65,3 +66,27 @@ flowchart TD
 - **向量化执行**：以列式批（vector/Batch）为单位处理数据，提升 CPU 缓存命中率与 SIMD 利用率。
 - **Arena 内存管理**：执行期内存按批分配、按查询整体释放，降低分配开销。
 - **并行执行**：通过 thread_pool 对 segment 级数据切片进行并行扫描与聚合。
+- **键索引**：`PRIMARY KEY` 在 `TableStorage::Append` 统一校验唯一性（任何写入口都无法绕过）；
+  完整等值条件由物理计划选择 IndexScan 点查。索引只存内存并随 `catalog.meta` 持久化键定义，
+  重启时从 segment 重建，避免索引文件与数据的一致性问题。
+
+## 键语法
+
+```sql
+CREATE TABLE users (
+    id INT PRIMARY KEY,        -- 列级主键
+    age INT,
+    city VARCHAR,
+    KEY idx_age (age)          -- 二级键（非唯一，仅加速等值查询）
+);
+
+CREATE TABLE orders (
+    user_id INT,
+    order_id INT,
+    amount DOUBLE,
+    PRIMARY KEY (user_id, order_id),   -- 复合主键
+    KEY idx_amount (amount)
+);
+```
+
+第一版只优化「键列全部为等值条件」的查询；范围查询与不完整复合键继续走 SeqScan。

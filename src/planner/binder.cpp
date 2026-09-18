@@ -1,6 +1,7 @@
 #include "binder.h"
 
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace simple_olap {
@@ -54,34 +55,78 @@ BoundStatementPtr Binder::BindCreateTable(const CreateTableStatement& stmt) {
         throw SemanticException("Table already exists: " + stmt.table_name);
     }
 
-    // 2. 校验列定义
-    std::unordered_set<std::string> seen_cols;
-    std::vector<BoundColumnDef> bound_cols;
-    bound_cols.reserve(stmt.columns.size());
+    // 2. 列定义校验 + column_id 按列顺序从 0 分配（Parser 只负责语法）
+    TableSchema schema;
+    schema.columns.reserve(stmt.columns.size());
 
-    for (const auto& col : stmt.columns) {
+    std::unordered_map<std::string, ColumnId> column_ids;
+    for (uint32_t i = 0; i < static_cast<uint32_t>(stmt.columns.size()); ++i) {
+        const auto& col = stmt.columns[i];
+
         // 校验空列名
         if (col.name.empty()) {
             throw SemanticException("Column name cannot be empty");
         }
         // 校验列名重复
-        if (seen_cols.count(col.name)) {
+        if (column_ids.count(col.name) > 0) {
             throw SemanticException("Duplicate column name: " + col.name);
         }
-        seen_cols.insert(col.name);
-
         // 校验数据类型
         if (col.type == DataType::INVALID) {
             throw SemanticException("Invalid data type for column: " + col.name);
         }
 
-        bound_cols.push_back({col.name, col.type});
+        column_ids[col.name] = i;
+        schema.columns.push_back(ColumnSchema{i, col.name, col.type});
     }
 
-    // 3. 组装返回
+    // 3. 键约束绑定：键列名 -> ColumnId；key_id 按定义出现顺序从 0 分配。
+    //    主键与二级键共用同一 id 空间，Storage 侧按 KeyId 查找无需区分来源。
+    KeyId next_key_id = 0;
+    std::unordered_set<std::string> secondary_names;
+
+    for (const auto& key : stmt.keys) {
+        if (key.columns.empty()) {
+            throw SemanticException("Key definition must contain at least one column");
+        }
+
+        KeySchema bound;
+        bound.key_id = next_key_id++;
+        bound.type = (key.type == KeyConstraint::Type::PRIMARY) ? KeyType::PRIMARY : KeyType::SECONDARY;
+
+        std::unordered_set<ColumnId> seen_columns;
+        bound.columns.reserve(key.columns.size());
+        for (const auto& column_name : key.columns) {
+            const auto it = column_ids.find(column_name);
+            if (it == column_ids.end()) {
+                throw SemanticException("Key references unknown column: " + column_name);
+            }
+            if (seen_columns.count(it->second) > 0) {
+                throw SemanticException("Duplicate column in key definition: " + column_name);
+            }
+            seen_columns.insert(it->second);
+            bound.columns.push_back(it->second);
+        }
+
+        if (bound.type == KeyType::PRIMARY) {
+            if (schema.primary_key.has_value()) {
+                throw SemanticException("Multiple PRIMARY KEY definitions");
+            }
+            bound.name = kPrimaryKeyName;
+            schema.primary_key = std::move(bound);
+        } else {
+            bound.name = key.name.empty() ? ("key_" + std::to_string(bound.key_id)) : key.name;
+            if (!secondary_names.insert(bound.name).second) {
+                throw SemanticException("Duplicate secondary key name: " + bound.name);
+            }
+            schema.secondary_keys.push_back(std::move(bound));
+        }
+    }
+
+    // 4. 组装返回：后续各层直接使用已绑定好的 TableSchema
     auto result = std::make_unique<BoundCreateTableStatement>();
     result->table_name = stmt.table_name;
-    result->columns = std::move(bound_cols);
+    result->schema = std::move(schema);
     return result;
 }
 

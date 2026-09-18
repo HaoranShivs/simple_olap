@@ -49,6 +49,12 @@ class SegmentReader {
     // 本方法不再负责 predicate 语义（metadata 判断 / 行过滤由 StorageManager 编排）。
     bool GetVectorBatch(const ScanOptions& scanoptions, uint32_t offset, VectorBatch& output);
 
+    // 按给定的 segment 内行偏移收集数据到 output（列顺序与 columns 一致）。
+    // 索引点查走本接口：row_offsets 可来自不同批次、任意顺序。
+    // 任一 offset 越界视为索引与数据不一致，返回 false。
+    bool GatherRows(const std::vector<uint32_t>& row_offsets, const std::vector<ColumnId>& columns,
+                    VectorBatch& output);
+
   private:
     SegmentReader(uint64_t segment_id, SegmentMeta matedata, MappedFile file);
 

@@ -21,6 +21,8 @@ enum class TokenType {
     BY,
     CREATE,
     TABLE,
+    PRIMARY, // 键约束：PRIMARY KEY
+    KEY,     // 键约束：KEY
     INSERT,
     INTO,
     VALUES,

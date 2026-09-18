@@ -167,6 +167,10 @@ Token Lexer::ReadIdentifierOrKeyword() {
         return Token{TokenType::CREATE, text, start};
     if (text == "TABLE")
         return Token{TokenType::TABLE, text, start};
+    if (text == "PRIMARY")
+        return Token{TokenType::PRIMARY, text, start};
+    if (text == "KEY")
+        return Token{TokenType::KEY, text, start};
     if (text == "INSERT")
         return Token{TokenType::INSERT, text, start};
     if (text == "INTO")

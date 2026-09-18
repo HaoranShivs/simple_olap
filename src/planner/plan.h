@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../catalog/catalog.h"
 #include "optimizer/optimizer.h"
 #include "physical_plan/physical_planner.h"
 #include "planner.h"
@@ -9,6 +10,9 @@ namespace simple_olap {
 // 最小 façade：方便 main/test 一次完成 logical -> optimize -> physical。
 class PlanPipeline {
   public:
+    // catalog 供 PhysicalPlanner 做 Access Path Selection（读取键定义）
+    explicit PlanPipeline(const Catalog& catalog) : physical_planner_(catalog) {}
+
     PhysicalPlanPtr Build(const BoundStatement& statement, std::string* logical_explain = nullptr) const {
         auto logical = planner_.CreateLogicalPlan(statement);
         optimizer_.Optimize(logical);

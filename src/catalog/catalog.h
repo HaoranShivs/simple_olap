@@ -5,7 +5,6 @@
 #include <string_view>
 #include <unordered_map>
 
-#include "../sql/ast/statement.h" // CreateTableStatement
 #include "../storage/datastructs.h"
 #include "../type.h"
 #include "table_catalog_entry.h"
@@ -31,9 +30,10 @@ class Catalog {
 
     // ---------- 表变更 ----------
 
-    // 创建新表条目：column_id 按列顺序从 0 分配，table_id 自动分配。
-    // 成功后立即持久化 catalog.meta；失败返回 false 且不留副作用。
-    bool CreateTable(const CreateTableStatement& stmt);
+    // 创建新表条目（schema 已由 Binder 完成校验与 column_id / key 绑定）：
+    // table_id 自动分配，成功后立即持久化 catalog.meta；
+    // 失败返回 false 且不留副作用。
+    bool CreateTable(const std::string& table_name, const TableSchema& schema);
 
     // 删除表条目（物理数据目录由 StorageManager::DropTable 负责）
     bool DropTable(std::string_view table_name);

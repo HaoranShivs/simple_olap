@@ -6,6 +6,7 @@
 #include <system_error>
 
 #include "../../execution/vector/vector.h"
+#include "../index/table_index_manager.h"
 #include "../scan/parallel_scan_session.h"
 #include "../scan/row_filter.h"
 
@@ -85,6 +86,10 @@ TableStorage::TableStorage(TableId table_id, std::filesystem::path table_path, c
     }
     next_segment_id_ = next;
     CreateActiveSegment();
+
+    // 键索引只在内存中维护：从已落盘 segment 重建，不引入索引文件一致性问题
+    index_manager_ = std::make_unique<TableIndexManager>(*schema_);
+    RebuildIndexes();
 }
 
 TableStorage::~TableStorage() {
@@ -102,21 +107,36 @@ TableStorage::~TableStorage() {
 // ---------- 写路径 ----------
 
 void TableStorage::Append(const DataChunk& input) {
-    // 浅拷贝，共享底层缓冲；后续用 Slice 切块
+    std::lock_guard<std::mutex> lock(index_mutex_);
+
+    // 1. 主键唯一性必须在写入前整批校验（批内重复 + 与已写入数据重复）。
+    //    校验纯读、不修改状态，因此失败时不会留下半条 SQL 的数据。
+    if (!index_manager_->ValidatePrimaryKey(input)) {
+        throw std::runtime_error("TableStorage::Append - duplicate primary key value");
+    }
+
+    // 2. 浅拷贝，共享底层缓冲；后续用 Slice 切块
     DataChunk chunk = input;
+
+    // locations[j] 对应 input 第 j 行的最终物理位置（可能跨多个 segment）
+    std::vector<RowLocation> locations;
+    locations.reserve(input.size());
+
     while (chunk.size() > 0) {
         // 活跃 segment 的剩余容量
         uint32_t remaining = kMaxSegmentRowCount - active_segment_->row_count();
 
         if (chunk.size() <= remaining) {
             // 整个 chunk 放得下，直接写入
-            active_segment_->Append(chunk);
+            auto appended = AppendInternal(active_segment_id_, chunk);
+            locations.insert(locations.end(), appended.begin(), appended.end());
             break;
         }
 
         // 剩余容量不够，切块：本 segment 先装前 remaining 行
         DataChunk rest = chunk.Slice(remaining);
-        active_segment_->Append(chunk);
+        auto appended = AppendInternal(active_segment_id_, chunk);
+        locations.insert(locations.end(), appended.begin(), appended.end());
 
         // 封存当前 segment，开启新的活跃 segment
         SealActiveSegment();
@@ -124,6 +144,24 @@ void TableStorage::Append(const DataChunk& input) {
 
         chunk = std::move(rest);
     }
+
+    // 3. 索引立即登记（visible=false）：后续 INSERT 能发现重复；
+    //    查询要等 segment 落盘后（MarkSegmentsVisible）才能看到。
+    index_manager_->OnAppend(input, locations);
+}
+
+std::vector<RowLocation> TableStorage::AppendInternal(SegmentId segment_id, const DataChunk& chunk) {
+    const uint32_t start_offset = active_segment_->row_count();
+    const uint32_t row_count = static_cast<uint32_t>(chunk.size());
+
+    active_segment_->Append(chunk);
+
+    std::vector<RowLocation> locations;
+    locations.reserve(row_count);
+    for (uint32_t i = 0; i < row_count; ++i) {
+        locations.push_back(RowLocation{segment_id, start_offset + i});
+    }
+    return locations;
 }
 
 void TableStorage::SealActiveSegment() {
@@ -132,6 +170,8 @@ void TableStorage::SealActiveSegment() {
 }
 
 bool TableStorage::Flush() {
+    std::lock_guard<std::mutex> lock(index_mutex_);
+
     // 0. 活跃 segment 非空时先封存：Scan 只读已落盘 segment，
     //    不封存的话刚 Append 的数据对查询不可见（析构兜底也是同样语义）
     if (active_segment_ != nullptr && active_segment_->row_count() > 0) {
@@ -146,12 +186,22 @@ bool TableStorage::Flush() {
         const std::filesystem::path seg_path = table_path_ / std::to_string(entry.first);
         if (entry.second->Flush(seg_path)) {
             metadata_.segment_ids.push_back(entry.first);
+            pending_visible_segments_.push_back(entry.first);
         }
     }
     sealed_segments_.clear();
 
     // 2. 持久化 table.meta（segment id 列表是唯一需要同步的物理元数据）
-    return SaveMeta();
+    const bool saved = SaveMeta();
+
+    // 3. 数据已落盘、元数据已持久化：这些 segment 的索引条目对查询可见。
+    //    保留 pending 列表：若本次 SaveMeta 失败，下次成功后仍能补标记。
+    if (saved) {
+        index_manager_->MarkSegmentsVisible(pending_visible_segments_);
+        pending_visible_segments_.clear();
+    }
+
+    return saved;
 }
 
 bool TableStorage::SaveMeta() const {
@@ -173,6 +223,40 @@ bool TableStorage::SaveMeta() const {
 void TableStorage::CreateActiveSegment() {
     active_segment_id_ = next_segment_id_++;
     active_segment_ = std::make_unique<SegmentBuilder>(*schema_);
+}
+
+void TableStorage::RebuildIndexes() {
+    if (metadata_.segment_ids.empty() || index_manager_->key_columns().empty()) {
+        return;
+    }
+
+    // 键列并集一次读取。segment 打开失败时直接报错：
+    // 静默跳过会让主键唯一性在重建后失效，宁可拒绝打开表。
+    const std::vector<ColumnId> key_columns = index_manager_->key_columns();
+
+    ScanOptions options;
+    options.columns = key_columns;
+
+    for (SegmentId segment_id : metadata_.segment_ids) {
+        SegmentReader* reader = GetSegmentReader(segment_id);
+        if (reader == nullptr) {
+            throw std::runtime_error("TableStorage::RebuildIndexes - failed to open segment " +
+                                     std::to_string(segment_id));
+        }
+
+        VectorBatch batch(buffer_pool_);
+        uint32_t offset = 0;
+        while (reader->GetVectorBatch(options, offset, batch) && batch.size > 0) {
+            std::vector<RowLocation> locations;
+            locations.reserve(batch.size);
+            for (uint32_t i = 0; i < batch.size; ++i) {
+                locations.push_back(RowLocation{segment_id, offset + i});
+            }
+
+            index_manager_->RebuildFromBatch(key_columns, batch, locations);
+            offset += batch.size;
+        }
+    }
 }
 
 // ---------- 读路径 ----------
@@ -346,6 +430,22 @@ bool TableStorage::Scan(const ScanOptions& options, ScanCursor& cursor, VectorBa
     // 所有 segment 都已读完
     output.Reset();
     return false;
+}
+
+// ---------- 键索引 ----------
+
+std::vector<RowLocation> TableStorage::Lookup(KeyId key_id, const EncodedKey& key) const {
+    std::lock_guard<std::mutex> lock(index_mutex_);
+    return index_manager_->Lookup(key_id, key);
+}
+
+bool TableStorage::ReadRows(SegmentId segment_id, const std::vector<uint32_t>& row_offsets,
+                            const std::vector<ColumnId>& columns, VectorBatch& output) {
+    SegmentReader* reader = GetSegmentReader(segment_id);
+    if (reader == nullptr) {
+        return false;
+    }
+    return reader->GatherRows(row_offsets, columns, output);
 }
 
 // ---------- 并行扫描 ----------

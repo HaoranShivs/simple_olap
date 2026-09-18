@@ -31,6 +31,7 @@ ExecutionEngine::~ExecutionEngine() = default;
 bool ExecutionEngine::IsQueryPlan(const PhysicalPlan& plan) const {
     switch (plan.GetType()) {
     case PhysicalPlan::Type::SEQ_SCAN:
+    case PhysicalPlan::Type::INDEX_SCAN:
     case PhysicalPlan::Type::FILTER:
     case PhysicalPlan::Type::PROJECT:
     case PhysicalPlan::Type::HASH_AGGREGATE:

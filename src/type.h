@@ -5,6 +5,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <variant>
 
 namespace simple_olap {
 
@@ -24,6 +25,21 @@ enum class CmpOp : uint8_t { EQ, NE, GT, GE, LT, LE };
 using TableId = uint32_t;
 using ColumnId = uint32_t;
 using SegmentId = uint32_t;
+using KeyId = uint32_t;
+
+// 无效 ID 哨兵值（如未绑定的列）
+constexpr ColumnId kInvalidColumnId = 0xFFFFFFFFu;
+
+// 键类型：主键参与唯一性约束，二级键只用于查询加速
+enum class KeyType : uint8_t {
+    PRIMARY = 0,
+    SECONDARY = 1,
+};
+
+// 索引键编码 / 查找使用的标量值。
+// 按列的真实类型承载，不走 double：INT64 超过 2^53 后转 double 会丢失精度，
+// 用它做键会导致两个不同的主键被误判为同一个。
+using ScalarValue = std::variant<int32_t, int64_t, float, double, std::string>;
 
 // 聚合函数类型：公共定义，供 SQL AST 与执行层共用
 enum class AggType : uint8_t {

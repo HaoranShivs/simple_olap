@@ -15,6 +15,7 @@ class PhysicalPlan {
   public:
     enum class Type : uint8_t {
         SEQ_SCAN,
+        INDEX_SCAN,
         FILTER,
         PROJECT,
         HASH_AGGREGATE,
@@ -88,6 +89,51 @@ class PhysicalSeqScan final : public PhysicalPlan {
     std::vector<uint32_t> columns_;
 
     std::vector<SimplePredicate> predicates_;
+};
+
+// 索引点查：由 Access Path Selection 在「pushed predicates 完整覆盖某个键」时
+// 替代 SeqScan 生成。lookup_values 与键列顺序一一对应；
+// residual_predicates 是未被 lookup 消耗、仍需逐行精确判断的谓词。
+class PhysicalIndexScan final : public PhysicalPlan {
+  public:
+    PhysicalIndexScan(uint32_t table_oid, KeyId key_id, std::vector<PlanLiteralValue> lookup_values,
+                      std::vector<uint32_t> columns, std::vector<SimplePredicate> residual_predicates)
+        : PhysicalPlan(Type::INDEX_SCAN), table_oid_(table_oid), key_id_(key_id),
+          lookup_values_(std::move(lookup_values)), columns_(std::move(columns)),
+          residual_predicates_(std::move(residual_predicates)) {}
+
+    uint32_t GetTableOid() const {
+        return table_oid_;
+    }
+
+    KeyId GetKeyId() const {
+        return key_id_;
+    }
+
+    const std::vector<PlanLiteralValue>& GetLookupValues() const {
+        return lookup_values_;
+    }
+
+    const std::vector<uint32_t>& GetColumns() const {
+        return columns_;
+    }
+
+    const std::vector<SimplePredicate>& GetResidualPredicates() const {
+        return residual_predicates_;
+    }
+
+    std::string ToString(size_t indent = 0) const override;
+
+  private:
+    uint32_t table_oid_;
+
+    KeyId key_id_;
+
+    std::vector<PlanLiteralValue> lookup_values_;
+
+    std::vector<uint32_t> columns_;
+
+    std::vector<SimplePredicate> residual_predicates_;
 };
 
 class PhysicalFilter final : public PhysicalPlan {
@@ -181,21 +227,21 @@ class PhysicalInsert final : public PhysicalPlan {
 
 class PhysicalCreateTable final : public PhysicalPlan {
   public:
-    PhysicalCreateTable(std::string table_name, std::vector<BoundColumnDef> columns)
-        : PhysicalPlan(Type::CREATE_TABLE), table_name_(std::move(table_name)), columns_(std::move(columns)) {}
+    PhysicalCreateTable(std::string table_name, TableSchema schema)
+        : PhysicalPlan(Type::CREATE_TABLE), table_name_(std::move(table_name)), schema_(std::move(schema)) {}
 
     const std::string& GetTableName() const {
         return table_name_;
     }
-    const std::vector<BoundColumnDef>& GetColumns() const {
-        return columns_;
+    const TableSchema& GetSchema() const {
+        return schema_;
     }
 
     std::string ToString(size_t indent = 0) const override;
 
   private:
     std::string table_name_;
-    std::vector<BoundColumnDef> columns_;
+    TableSchema schema_;
 };
 
 } // namespace simple_olap

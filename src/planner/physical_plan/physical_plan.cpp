@@ -26,6 +26,21 @@ std::string PhysicalSeqScan::ToString(size_t indent) const {
     return out.str();
 }
 
+std::string PhysicalIndexScan::ToString(size_t indent) const {
+    std::ostringstream out;
+    out << Pad(indent) << "PhysicalIndexScan(table=" << table_oid_ << ", key=" << key_id_ << ", columns=[";
+    for (size_t i = 0; i < columns_.size(); ++i) {
+        if (i)
+            out << ",";
+        out << columns_[i];
+    }
+    out << "], lookup=" << lookup_values_.size();
+    if (!residual_predicates_.empty())
+        out << ", residual=" << residual_predicates_.size();
+    out << ")";
+    return out.str();
+}
+
 std::string PhysicalFilter::ToString(size_t indent) const {
     return Pad(indent) + "PhysicalFilter(" + predicate_->ToString() + ")\n" + child_->ToString(indent + 2);
 }
@@ -51,7 +66,10 @@ std::string PhysicalInsert::ToString(size_t indent) const {
 }
 
 std::string PhysicalCreateTable::ToString(size_t indent) const {
-    return Pad(indent) + "PhysicalCreateTable(" + table_name_ + ")";
+    std::ostringstream out;
+    out << Pad(indent) << "PhysicalCreateTable(" << table_name_ << ", columns=" << schema_.columns.size()
+        << ", keys=" << (schema_.primary_key.has_value() ? 1 : 0) + schema_.secondary_keys.size() << ")";
+    return out.str();
 }
 
 } // namespace simple_olap

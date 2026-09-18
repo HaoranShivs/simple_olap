@@ -16,7 +16,6 @@
 #include "main/connection.h"
 #include "main/database.h"
 #include "main/query_result.h"
-#include "sql/ast/statement.h"
 #include "storage/datachunk.h"
 #include "storage/datastructs.h"
 #include "storage/table/table_storage.h"
@@ -257,12 +256,11 @@ int GenerateDataset(Database& database, const std::string& table_name, uint64_t 
         }
     }
 
-    CreateTableStatement stmt;
-    stmt.table_name = table_name;
-    stmt.columns.push_back(ColumnSchema{0, "id", DataType::INT64});
-    stmt.columns.push_back(ColumnSchema{1, "value", DataType::DOUBLE});
+    TableSchema schema;
+    schema.columns.push_back(ColumnSchema{0, "id", DataType::INT64});
+    schema.columns.push_back(ColumnSchema{1, "value", DataType::DOUBLE});
 
-    if (!database.CreateTable(stmt)) {
+    if (!database.CreateTable(table_name, schema)) {
         std::cerr << "failed to create table: " << table_name << "\n";
         return 1;
     }
@@ -323,6 +321,7 @@ void PrintHelp() {
     std::cout << "simple_olap SQL REPL\n"
               << "Supported statements (end with ';'):\n"
               << "  CREATE TABLE t (col INT, col2 DOUBLE, ...);\n"
+              << "  CREATE TABLE t (id INT PRIMARY KEY, age INT, KEY idx_age (age));\n"
               << "  INSERT INTO t VALUES (1, 3.5), (2, 4.5);\n"
               << "  INSERT INTO t (a, b) VALUES (1, 3.5);\n"
               << "  SELECT * FROM t;\n"

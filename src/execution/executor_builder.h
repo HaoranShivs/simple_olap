@@ -62,6 +62,7 @@ class ExecutorBuilder {
   private:
     BuiltExecutor BuildNode(const PhysicalPlan& plan, const ExecutorBuildOptions& options) const;
     BuiltExecutor BuildSeqScan(const PhysicalSeqScan& plan, const ExecutorBuildOptions& options) const;
+    BuiltExecutor BuildIndexScan(const PhysicalIndexScan& plan, const ExecutorBuildOptions& options) const;
     BuiltExecutor BuildFilter(const PhysicalFilter& plan, const ExecutorBuildOptions& options) const;
     BuiltExecutor BuildProject(const PhysicalProject& plan, const ExecutorBuildOptions& options) const;
     BuiltExecutor BuildHashAggregate(const PhysicalHashAggregate& plan, const ExecutorBuildOptions& options) const;

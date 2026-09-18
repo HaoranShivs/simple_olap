@@ -30,6 +30,15 @@ struct TableCatalogEntry {
         entry.schema = TableSchema::Deserialize(reader);
         return entry;
     }
+
+    // V2 旧格式：schema 只有列定义，没有键（保持只读兼容）
+    static TableCatalogEntry DeserializeLegacy(BinaryReader& reader) {
+        TableCatalogEntry entry;
+        entry.name = reader.ReadString();
+        entry.table_id = reader.ReadUInt32();
+        entry.schema = TableSchema::DeserializeLegacy(reader);
+        return entry;
+    }
 };
 
 } // namespace simple_olap

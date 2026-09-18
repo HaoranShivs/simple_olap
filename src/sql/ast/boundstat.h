@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "../../storage/datastructs.h" // TableSchema
 #include "boundexpr.h"
 
 namespace simple_olap {
@@ -110,19 +111,15 @@ class BoundInsertStatement : public BoundStatement {
     }
 };
 
-// 绑定后的列定义（CREATE TABLE 使用）。
-struct BoundColumnDef {
-    std::string name;
-    DataType type;
-};
-
 // 绑定后的 CREATE TABLE 语句。
+// Binder 已完成列名 -> ColumnId、键列名 -> ColumnId 的绑定与语义校验，
+// 因此后续 Planner / Catalog 直接使用 TableSchema，无需再次转换。
 class BoundCreateTableStatement : public BoundStatement {
   public:
     BoundCreateTableStatement() : BoundStatement(Type::CREATE_TABLE) {}
-    // 目标表名与列定义。
+
     std::string table_name;
-    std::vector<BoundColumnDef> columns;
+    TableSchema schema;
 
     std::string ToString() const override {
         return "BoundCreateTableStatement(...)";

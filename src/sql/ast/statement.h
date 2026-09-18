@@ -118,6 +118,21 @@ class InsertStatement : public Statement {
     }
 };
 
+// CREATE TABLE 中的键约束（PRIMARY KEY / KEY）。
+// Parser 只记录语法信息（列名），列名到 ColumnId 的绑定由 Binder 完成。
+// 列级写法（id INT PRIMARY KEY）也在 Parser 内统一转换成表级约束，
+// 使后续各层无需区分两种写法。
+struct KeyConstraint {
+    enum class Type : uint8_t {
+        PRIMARY,
+        SECONDARY,
+    };
+
+    Type type = Type::SECONDARY;
+    std::string name;                 // 二级键名；PRIMARY 或未命名时为空
+    std::vector<std::string> columns; // 键包含的列名（顺序即编码顺序）
+};
+
 // CREATE TABLE 语句。
 class CreateTableStatement : public Statement {
   public:
@@ -128,6 +143,9 @@ class CreateTableStatement : public Statement {
 
     // 列定义列表（值语义存储，内存连续，访问快）。
     std::vector<ColumnSchema> columns;
+
+    // 键约束列表：PRIMARY KEY 至多一个，KEY 可多个
+    std::vector<KeyConstraint> keys;
 
     // 暂不支持：OLAP 排序键 (Sort Key)，保留设计草稿。
     // 数据按排序键物理排序，可加速带这些列前缀的 WHERE 过滤与 GROUP BY。
@@ -149,13 +167,30 @@ class CreateTableStatement : public Statement {
             sql += "  " + col.name + " ";
             auto t = static_cast<int>(col.type);
             sql += (t >= 0 && t < 6) ? type_names[t] : "UNKNOWN";
-            if (i < columns.size() - 1)
-                sql += ",\n";
+            if (i + 1 < columns.size() || !keys.empty())
+                sql += ",";
+            sql += "\n";
         }
-        sql += "\n)";
 
-        // 排序键 (sort_keys) 暂不支持，待启用成员后在此打印
+        for (size_t i = 0; i < keys.size(); ++i) {
+            const auto& key = keys[i];
+            sql += "  ";
+            sql += (key.type == KeyConstraint::Type::PRIMARY) ? "PRIMARY KEY" : "KEY";
+            if (!key.name.empty())
+                sql += " " + key.name;
+            sql += " (";
+            for (size_t j = 0; j < key.columns.size(); ++j) {
+                if (j > 0)
+                    sql += ", ";
+                sql += key.columns[j];
+            }
+            sql += ")";
+            if (i + 1 < keys.size())
+                sql += ",";
+            sql += "\n";
+        }
 
+        sql += ")";
         return sql;
     }
 

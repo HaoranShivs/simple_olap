@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -84,6 +85,12 @@ struct Condition {
     std::variant<int32_t, int64_t, double, std::string> value;
 };
 
+// 索引条目指向的物理位置：某 segment 内的行偏移
+struct RowLocation {
+    SegmentId segment_id = 0;
+    uint32_t row_offset = 0;
+};
+
 struct ScanOptions {
     uint64_t start_row = 0;
     uint64_t end_row = UINT64_MAX;
@@ -117,19 +124,93 @@ struct ColumnSchema {
     }
 };
 
+// 键定义：Catalog 层持久化，Storage 层据此维护索引。
+// 列名在 Binder 阶段已绑定为 ColumnId，因此这里只存 id。
+struct KeySchema {
+    KeyId key_id = 0;
+    std::string name;
+    KeyType type = KeyType::SECONDARY;
+
+    // 复合键的列顺序即编码/比较顺序
+    std::vector<ColumnId> columns;
+
+    void Serialize(BinaryWriter& writer) const {
+        writer.WriteUInt32(key_id);
+        writer.WriteString(name);
+        writer.WriteUInt8(static_cast<uint8_t>(type));
+        writer.WriteUInt32(static_cast<uint32_t>(columns.size()));
+        for (ColumnId column : columns) {
+            writer.WriteUInt32(column);
+        }
+    }
+
+    static KeySchema Deserialize(BinaryReader& reader) {
+        KeySchema schema;
+        schema.key_id = reader.ReadUInt32();
+        schema.name = reader.ReadString();
+        schema.type = static_cast<KeyType>(reader.ReadUInt8());
+        const uint32_t count = reader.ReadUInt32();
+        schema.columns.reserve(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            schema.columns.push_back(reader.ReadUInt32());
+        }
+        return schema;
+    }
+};
+
+// 主键在 Catalog 中的固定名字（未显式命名的 PRIMARY KEY 统一用它）
+constexpr const char* kPrimaryKeyName = "__primary__";
+
 struct TableSchema {
     std::vector<ColumnSchema> columns;
+
+    // 主键至多一个；键定义的权威来源在 Catalog，随 catalog.meta 持久化
+    std::optional<KeySchema> primary_key;
+
+    std::vector<KeySchema> secondary_keys;
 
     void Serialize(BinaryWriter& writer) const {
         writer.WriteUInt32(static_cast<uint32_t>(columns.size()));
         for (const auto& col : columns) {
             col.Serialize(writer);
         }
+
+        writer.WriteUInt8(primary_key.has_value() ? 1 : 0);
+        if (primary_key.has_value()) {
+            primary_key->Serialize(writer);
+        }
+
+        writer.WriteUInt32(static_cast<uint32_t>(secondary_keys.size()));
+        for (const auto& key : secondary_keys) {
+            key.Serialize(writer);
+        }
     }
 
+    // V3 格式：列 + 主键 + 二级键
     static TableSchema Deserialize(BinaryReader& reader) {
         TableSchema schema;
-        uint32_t count = reader.ReadUInt32();
+        const uint32_t count = reader.ReadUInt32();
+        schema.columns.reserve(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            schema.columns.push_back(ColumnSchema::Deserialize(reader));
+        }
+
+        if (reader.ReadUInt8() != 0) {
+            schema.primary_key = KeySchema::Deserialize(reader);
+        }
+
+        const uint32_t key_count = reader.ReadUInt32();
+        schema.secondary_keys.reserve(key_count);
+        for (uint32_t i = 0; i < key_count; ++i) {
+            schema.secondary_keys.push_back(KeySchema::Deserialize(reader));
+        }
+        return schema;
+    }
+
+    // V2 旧格式：只有列，没有键定义（保持只读兼容）
+    static TableSchema DeserializeLegacy(BinaryReader& reader) {
+        TableSchema schema;
+        const uint32_t count = reader.ReadUInt32();
         schema.columns.reserve(count);
         for (uint32_t i = 0; i < count; ++i) {
             schema.columns.push_back(ColumnSchema::Deserialize(reader));
@@ -137,6 +218,29 @@ struct TableSchema {
         return schema;
     }
 };
+
+// 按 column_id 查找列定义；未找到返回 nullptr
+inline const ColumnSchema* FindColumnSchema(const TableSchema& schema, ColumnId column_id) {
+    for (const auto& column : schema.columns) {
+        if (column.column_id == column_id) {
+            return &column;
+        }
+    }
+    return nullptr;
+}
+
+// 按 KeyId 查找键定义（主键与二级键统一查找）；未找到返回 nullptr
+inline const KeySchema* FindKeySchema(const TableSchema& schema, KeyId key_id) {
+    if (schema.primary_key.has_value() && schema.primary_key->key_id == key_id) {
+        return &*schema.primary_key;
+    }
+    for (const auto& key : schema.secondary_keys) {
+        if (key.key_id == key_id) {
+            return &key;
+        }
+    }
+    return nullptr;
+}
 
 struct CatalogMeta {
     // 暂时不设置用户，版本，权限等信息。
@@ -243,7 +347,8 @@ struct SegmentMeta {
 
     std::vector<ColumnChunkMeta> col_chunk_metas_;
 
-    // 预留扩展位：键的 min/max、主键稀疏索引等；本项目暂不使用。
+    // 段级 min/max 与键索引在内存中重建，不写入 table.meta；
+    // 键定义由 Catalog 持久化，物理布局变化（预留扩展）才需要写入这里。
 
     void Serialize(BinaryWriter& writer) const {
         writer.WriteUInt32(segment_id);

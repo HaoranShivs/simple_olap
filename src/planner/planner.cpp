@@ -78,7 +78,7 @@ LogicalPlanPtr Planner::PlanInsert(const BoundInsertStatement &statement) const 
 }
 
 LogicalPlanPtr Planner::PlanCreateTable(const BoundCreateTableStatement &statement) const {
-    return std::make_unique<LogicalCreateTable>(statement.table_name, statement.columns);
+    return std::make_unique<LogicalCreateTable>(statement.table_name, statement.schema);
 }
 
 } // namespace simple_olap

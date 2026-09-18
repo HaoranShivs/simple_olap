@@ -21,19 +21,19 @@ Database::~Database() {
 
 // ---------- DDL 协调（Catalog 与 StorageManager 的唯一交汇处） ----------
 
-bool Database::CreateTable(const CreateTableStatement& stmt) {
+bool Database::CreateTable(const std::string& table_name, const TableSchema& schema) {
     // 1. Catalog：登记逻辑元数据（name / schema / table_id）
-    if (!catalog_.CreateTable(stmt)) {
+    if (!catalog_.CreateTable(table_name, schema)) {
         return false;
     }
 
     // 2. StorageManager：创建物理存储（tables/{table_id}/ + table.meta）
-    const TableId table_id = catalog_.FindTable(stmt.table_name).value();
+    const TableId table_id = catalog_.FindTable(table_name).value();
     const TableCatalogEntry* entry = catalog_.GetTable(table_id);
     const auto storage = storage_manager_.CreateTable(table_id, entry->schema);
     if (storage == nullptr) {
         // 物理创建失败：回滚 Catalog 条目
-        catalog_.DropTable(stmt.table_name);
+        catalog_.DropTable(table_name);
         return false;
     }
 

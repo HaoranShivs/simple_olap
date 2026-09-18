@@ -55,7 +55,7 @@ QueryResult Connection::Query(std::string_view sql) {
 
     // ---------- 6. 物理计划 ----------
 
-    PhysicalPlanner physical_planner;
+    PhysicalPlanner physical_planner(database_.GetCatalog());
     PhysicalPlanPtr physical = physical_planner.CreatePhysicalPlan(*logical);
 
     // ---------- 7. 执行 ----------

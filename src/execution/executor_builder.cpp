@@ -10,6 +10,7 @@
 #include "expression/exec_expression.h"
 #include "filter/filter.h"
 #include "projection/projection.h"
+#include "scan/index_scan.h"
 #include "scan/seq_scan.h"
 
 namespace simple_olap {
@@ -190,6 +191,8 @@ BuiltExecutor ExecutorBuilder::BuildNode(const PhysicalPlan& plan, const Executo
     switch (plan.GetType()) {
     case PhysicalPlan::Type::SEQ_SCAN:
         return BuildSeqScan(static_cast<const PhysicalSeqScan&>(plan), options);
+    case PhysicalPlan::Type::INDEX_SCAN:
+        return BuildIndexScan(static_cast<const PhysicalIndexScan&>(plan), options);
     case PhysicalPlan::Type::FILTER:
         return BuildFilter(static_cast<const PhysicalFilter&>(plan), options);
     case PhysicalPlan::Type::PROJECT:
@@ -216,6 +219,69 @@ BuiltExecutor ExecutorBuilder::BuildSeqScan(const PhysicalSeqScan& plan, const E
     // 串行模式：直接访问 Storage
     return BuiltExecutor{std::make_unique<SeqScanOperator>(spec.table_id, std::move(spec.options), ctx_),
                          std::move(spec.output_schema)};
+}
+
+BuiltExecutor ExecutorBuilder::BuildIndexScan(const PhysicalIndexScan& plan, const ExecutorBuildOptions& options) const {
+    // INDEX_SCAN 不参与并行扫描（无 BatchStream），options 无需使用
+    (void)options;
+
+    const TableCatalogEntry* entry = ctx_->catalog->GetTable(plan.GetTableOid());
+    if (entry == nullptr) {
+        throw std::runtime_error("ExecutorBuilder: index scan table not found");
+    }
+
+    const TableSchema& table_schema = entry->schema;
+    std::vector<ColumnId> scan_columns;
+    scan_columns.reserve(plan.GetColumns().size());
+    for (uint32_t column : plan.GetColumns()) {
+        scan_columns.push_back(static_cast<ColumnId>(column));
+    }
+
+    // 与 SeqScan 相同的驱动列约定：无用户列时扫描第一列以推进行数
+    if (scan_columns.empty()) {
+        if (table_schema.columns.empty()) {
+            throw std::runtime_error("ExecutorBuilder: table has no columns");
+        }
+        scan_columns.push_back(table_schema.columns.front().column_id);
+    }
+
+    // lookup 值是 SQL 字面量，转成按列真实类型编码的 ScalarValue
+    std::vector<ScalarValue> lookup_values;
+    lookup_values.reserve(plan.GetLookupValues().size());
+    for (const auto& value : plan.GetLookupValues()) {
+        lookup_values.push_back(std::visit([](const auto& v) -> ScalarValue { return v; }, value));
+    }
+
+    // residual predicates 与 SeqScan 一致：按存储层 Condition 传递
+    std::vector<Condition> residual;
+    residual.reserve(plan.GetResidualPredicates().size());
+    for (const auto& predicate : plan.GetResidualPredicates()) {
+        Condition condition;
+        condition.column = static_cast<ColumnId>(predicate.column_index);
+        condition.op = predicate.op;
+        condition.value = std::visit(
+            [](const auto& v) -> std::variant<int32_t, int64_t, double, std::string> { return v; }, predicate.value);
+        residual.push_back(std::move(condition));
+    }
+
+    ExecSchema output_schema;
+    output_schema.reserve(scan_columns.size());
+    for (ColumnId column_id : scan_columns) {
+        const ColumnSchema* column = FindColumn(table_schema, column_id);
+        if (column == nullptr) {
+            throw std::runtime_error("ExecutorBuilder: index scan column not found in table schema");
+        }
+        ExecSlot slot;
+        slot.type = column->type;
+        slot.source = ColumnBinding{plan.GetTableOid(), column_id};
+        slot.name = column->name;
+        output_schema.push_back(std::move(slot));
+    }
+
+    return BuiltExecutor{std::make_unique<IndexScanOperator>(plan.GetTableOid(), plan.GetKeyId(),
+                                                             std::move(lookup_values), std::move(scan_columns),
+                                                             std::move(residual), ctx_),
+                         std::move(output_schema)};
 }
 
 BuiltExecutor ExecutorBuilder::BuildFilter(const PhysicalFilter& plan, const ExecutorBuildOptions& options) const {

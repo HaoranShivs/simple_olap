@@ -29,6 +29,9 @@ class Parser {
     // 解析 CREATE TABLE 语句。
     std::unique_ptr<CreateTableStatement> ParseCreateTable();
 
+    // 解析键定义的列名列表：'(' identifier_list ')'。
+    std::vector<std::string> ParseKeyColumnList();
+
     // 解析 INSERT INTO ... VALUES 语句。
     std::unique_ptr<InsertStatement> ParseInsert();
 

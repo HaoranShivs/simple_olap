@@ -263,6 +263,50 @@ bool SegmentReader::GetVectorBatch(const ScanOptions& scanoptions, uint32_t offs
     return scan_count > 0;
 }
 
+bool SegmentReader::GatherRows(const std::vector<uint32_t>& row_offsets, const std::vector<ColumnId>& columns,
+                               VectorBatch& output) {
+    output.columns.clear();
+    output.sel_vector.clear();
+    output.size = 0;
+
+    if (row_offsets.empty() || columns.empty()) {
+        return false;
+    }
+
+    // 越界说明索引条目与 segment 数据不一致，不能静默截断
+    for (uint32_t offset : row_offsets) {
+        if (offset >= metadata_.row_count) {
+            return false;
+        }
+    }
+
+    // 重建 output 的列结构（列顺序与 columns 一致）
+    for (ColumnId col_id : columns) {
+        output.AddColumn(GetColumnMeta(col_id).type);
+    }
+
+    const uint32_t count = static_cast<uint32_t>(row_offsets.size());
+    for (size_t i = 0; i < columns.size(); ++i) {
+        const ColumnChunkReader chunk = OpenColumn(columns[i]);
+        const ColumnChunkMeta& chunk_meta = chunk.metadata();
+        const size_t elem_size = TypeElemSize(chunk_meta.type);
+
+        auto& col_data = output.columns[i];
+        col_data.type = chunk_meta.type;
+        col_data.Resize(count);
+
+        // 逐行拷贝：与 GetVectorBatch 的整段拷贝不同，这里是离散行收集
+        uint8_t* dst = col_data.mutable_data<uint8_t>();
+        for (uint32_t r = 0; r < count; ++r) {
+            const std::byte* src = chunk.data() + static_cast<uint64_t>(row_offsets[r]) * elem_size;
+            std::memcpy(dst + static_cast<size_t>(r) * elem_size, src, elem_size);
+        }
+    }
+
+    output.size = count;
+    return true;
+}
+
 // ==========================================
 // SegmentBuilder - 写入侧
 // ==========================================

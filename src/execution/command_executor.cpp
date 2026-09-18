@@ -26,32 +26,22 @@ CommandResult CommandExecutor::Execute(const PhysicalPlan& plan) {
 // CREATE TABLE
 // ==========================================
 // DDL 协调点（对应 Database::CreateTable 的职责）：
-//   1. Catalog：登记逻辑元数据（name / schema / table_id）
+//   1. Catalog：登记逻辑元数据（name / schema / 键定义）
 //   2. StorageManager：创建物理存储（tables/{table_id}/ + table.meta）
 //   3. 物理创建失败时回滚 Catalog 条目
 CommandResult CommandExecutor::ExecuteCreateTable(const PhysicalCreateTable& plan) {
-    // 1. 物理计划 -> Catalog 语句（column_id 按列顺序从 0 分配，与 Catalog::CreateTable 约定一致）
-    CreateTableStatement stmt;
-    stmt.table_name = plan.GetTableName();
-
-    const auto& columns = plan.GetColumns();
-    stmt.columns.reserve(columns.size());
-    for (uint32_t i = 0; i < static_cast<uint32_t>(columns.size()); ++i) {
-        stmt.columns.push_back(ColumnSchema{i, columns[i].name, columns[i].type});
-    }
-
-    // 2. Catalog：登记元数据
-    if (!ctx_->catalog->CreateTable(stmt)) {
+    // 1. Catalog：登记元数据（schema 由 Binder 完成校验与绑定，各层直接复用）
+    if (!ctx_->catalog->CreateTable(plan.GetTableName(), plan.GetSchema())) {
         return CommandResult{false, 0};
     }
 
-    // 3. StorageManager：创建物理存储
-    const TableId table_id = ctx_->catalog->FindTable(stmt.table_name).value();
+    // 2. StorageManager：创建物理存储
+    const TableId table_id = ctx_->catalog->FindTable(plan.GetTableName()).value();
     const TableCatalogEntry* entry = ctx_->catalog->GetTable(table_id);
     const auto storage = ctx_->storage_manager->CreateTable(table_id, entry->schema);
     if (storage == nullptr) {
         // 物理创建失败：回滚 Catalog 条目
-        ctx_->catalog->DropTable(stmt.table_name);
+        ctx_->catalog->DropTable(plan.GetTableName());
         return CommandResult{false, 0};
     }
 

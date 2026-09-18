@@ -2,19 +2,22 @@
 
 #include <fstream>
 #include <system_error>
-#include <unordered_set>
 
 namespace simple_olap {
 // 元数据文件约定：位于 catalog 根目录下的 catalog.meta
 // Create / LoadMeta / SaveMeta 均以 root_path_ 为 catalog 根目录。
 //
-// 格式 v2（当前）：
-//   [magic "COL2"][entry 数量]{ [name][table_id][TableSchema] }...
-//   schema 的权威来源是 Catalog 本身，随 catalog.meta 一起持久化。
+// 格式 v3（当前）：
+//   [magic "COL3"][entry 数量]{ [name][table_id][TableSchema] }...
+//   TableSchema = 列定义 + 主键 + 二级键；schema/键的权威来源是 Catalog。
+// 格式 v2（旧，只读兼容）：
+//   [magic "COL2"][entry 数量]{ [name][table_id][只含列的 TableSchema] }...
+//   键定义留空。
 // 格式 v1（旧，只读兼容）：
 //   [entry 数量]{ [name][table_id] }...
 //   schema 留空（旧库的 table.meta 是已废弃的 TableMeta 格式，不再回读）。
-constexpr uint32_t kCatalogMetaMagic = 0x324C4F43; // "COL2" 小端
+constexpr uint32_t kCatalogMetaMagicV2 = 0x324C4F43; // "COL2" 小端
+constexpr uint32_t kCatalogMetaMagicV3 = 0x334C4F43; // "COL3" 小端
 
 // ---------- 持久化 ----------
 
@@ -60,7 +63,7 @@ bool Catalog::LoadMeta(const std::filesystem::path& path) {
     }
 
     // 3. 反序列化：
-    //    v2 格式带 magic，schema 随 catalog.meta 持久化（权威来源）；
+    //    v3 带 magic + 完整键定义；v2 带 magic 但只有列；
     //    v1 旧格式只存 name -> id 映射，schema 留空（保持只读兼容）。
     try {
         BinaryReader reader(buffer);
@@ -68,11 +71,23 @@ bool Catalog::LoadMeta(const std::filesystem::path& path) {
         name_index_.clear();
         tables_.clear();
 
-        // v2：magic + 完整条目（序列化逻辑在 TableCatalogEntry 内部）
-        if (buffer.size() >= sizeof(uint32_t) && reader.ReadUInt32() == kCatalogMetaMagic) {
+        const bool has_magic = buffer.size() >= sizeof(uint32_t);
+        const uint32_t magic = has_magic ? reader.ReadUInt32() : 0;
+
+        if (has_magic && magic == kCatalogMetaMagicV3) {
+            // v3：magic + 完整条目（列 + 键）
             const uint32_t count = reader.ReadUInt32();
             for (uint32_t i = 0; i < count; ++i) {
                 TableCatalogEntry entry = TableCatalogEntry::Deserialize(reader);
+
+                name_index_[entry.name] = entry.table_id;
+                tables_[entry.table_id] = std::move(entry);
+            }
+        } else if (has_magic && magic == kCatalogMetaMagicV2) {
+            // v2：magic + 只含列定义的条目，键（primary_key / secondary_keys）留空
+            const uint32_t count = reader.ReadUInt32();
+            for (uint32_t i = 0; i < count; ++i) {
+                TableCatalogEntry entry = TableCatalogEntry::DeserializeLegacy(reader);
 
                 name_index_[entry.name] = entry.table_id;
                 tables_[entry.table_id] = std::move(entry);
@@ -103,9 +118,9 @@ bool Catalog::LoadMeta(const std::filesystem::path& path) {
 }
 
 bool Catalog::SaveMeta() const {
-    // v2 格式：magic + 完整条目（序列化逻辑在 TableCatalogEntry 内部）
+    // v3 格式：magic + 完整条目（列 + 键，序列化逻辑在 TableCatalogEntry / TableSchema 内部）
     BinaryWriter writer;
-    writer.WriteUInt32(kCatalogMetaMagic);
+    writer.WriteUInt32(kCatalogMetaMagicV3);
     writer.WriteUInt32(static_cast<uint32_t>(tables_.size()));
     for (const auto& kv : tables_) {
         kv.second.Serialize(writer);
@@ -125,41 +140,22 @@ bool Catalog::SaveMeta() const {
 
 // ---------- 表变更 ----------
 
-bool Catalog::CreateTable(const CreateTableStatement& stmt) {
-    const std::string& table_name = stmt.table_name;
-    const auto& columns = stmt.columns;
-
-    // 1. 重名检查
+bool Catalog::CreateTable(const std::string& table_name, const TableSchema& schema) {
+    // 1. 重名检查（列名 / 键定义已由 Binder 校验）
     if (name_index_.count(table_name) > 0) {
         return false;
     }
 
-    // 2. 检查列名重复
-    std::unordered_set<std::string> seen_column_names;
-    for (const auto& col : columns) {
-        if (seen_column_names.count(col.name) > 0) {
-            return false;
-        }
-        seen_column_names.insert(col.name);
-    }
-
-    // 3. 转换 columns -> TableSchema（column_id 按顺序从 0 分配）
-    TableSchema schema;
-    schema.columns.reserve(columns.size());
-    for (uint32_t i = 0; i < static_cast<uint32_t>(columns.size()); ++i) {
-        schema.columns.push_back(ColumnSchema{i, columns[i].name, columns[i].type});
-    }
-
-    // 4. 组装目录条目并登记（table_id 自动分配）
+    // 2. 组装目录条目并登记（table_id 自动分配）
     TableCatalogEntry entry;
     entry.table_id = NextTableId();
     entry.name = table_name;
-    entry.schema = std::move(schema);
+    entry.schema = schema;
 
     name_index_[table_name] = entry.table_id;
     tables_[entry.table_id] = std::move(entry);
 
-    // 5. 立即持久化元数据；失败则回滚内存状态
+    // 3. 立即持久化元数据；失败则回滚内存状态
     if (!SaveMeta()) {
         const TableId rolled_back_id = name_index_[table_name];
         name_index_.erase(table_name);

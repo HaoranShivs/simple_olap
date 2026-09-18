@@ -10,6 +10,7 @@
 #include "../../type.h"
 #include "../datachunk.h"
 #include "../datastructs.h"
+#include "../index/key_encoder.h"
 #include "../scan/batch_stream.h"
 #include "../scan/storage_predicate.h"
 #include "../scan_request.h"
@@ -20,6 +21,9 @@ namespace simple_olap {
 // 前置声明：扫描游标（定义见 ../datastructs.h）
 struct ScanCursor;
 struct SegmentScanCursor;
+
+// 前置声明：单表键索引管理器（定义见 ../index/table_index_manager.h）
+class TableIndexManager;
 
 // 单表物理存储对象
 // 职责：
@@ -48,6 +52,9 @@ class TableStorage {
 
     // ---------- 写 ----------
 
+    // 追加一批行。主键唯一性在这里保证（而不是上层的 CommandExecutor），
+    // 使 CSV 导入 / BulkLoad 等其他写入口也无法绕过主键约束。
+    // 批内或与已写入数据重复时抛 std::runtime_error，且不写入任何行。
     void Append(const DataChunk& input);
 
     // 将内存中待刷盘的 segment 落盘，并持久化 table.meta
@@ -78,6 +85,16 @@ class TableStorage {
     std::shared_ptr<BatchStream> CreateParallelScan(const ScanOptions& options, size_t scan_threads,
                                                     size_t queue_capacity);
 
+    // ---------- 键索引 ----------
+
+    // 按键等值查找可见行位置（IndexScan 用）：主键 0/1 个，二级键可能多个。
+    // 只返回已落盘（对查询可见）的条目，与 SeqScan 的可见性语义一致。
+    std::vector<RowLocation> Lookup(KeyId key_id, const EncodedKey& key) const;
+
+    // 读取指定 segment 内若干行到 output（列顺序与 columns 一致）
+    bool ReadRows(SegmentId segment_id, const std::vector<uint32_t>& row_offsets, const std::vector<ColumnId>& columns,
+                  VectorBatch& output);
+
     // ---------- 观察接口 ----------
 
     TableId id() const noexcept {
@@ -102,6 +119,12 @@ class TableStorage {
   private:
     TableStorage(TableId table_id, std::filesystem::path table_path, const TableSchema& schema,
                  TableStorageMeta metadata, BufferPool* buffer_pool);
+
+    // 追加到指定 segment 并返回每行的物理位置（供索引登记使用）
+    std::vector<RowLocation> AppendInternal(SegmentId segment_id, const DataChunk& chunk);
+
+    // 从已落盘 segment 重建键索引（Open 时调用；无键定义时为空操作）
+    void RebuildIndexes();
 
     void SealActiveSegment();
 
@@ -132,6 +155,14 @@ class TableStorage {
     // 并行扫描时多个 worker 线程会并发触发懒加载，用互斥锁保护。
     std::mutex reader_cache_mutex_;
     std::unordered_map<SegmentId, std::unique_ptr<SegmentReader>> reader_cache_;
+
+    // 键索引管理器：Append 写、Lookup 读、Flush 改可见性，用互斥锁保护
+    std::unique_ptr<TableIndexManager> index_manager_;
+    mutable std::mutex index_mutex_;
+
+    // 已落盘但 table.meta 尚未持久化成功的 segment：
+    // 下一次 SaveMeta 成功后统一标记为对查询可见
+    std::vector<SegmentId> pending_visible_segments_;
 
     // append state
     SegmentId active_segment_id_ = 0;

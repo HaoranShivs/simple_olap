@@ -108,7 +108,8 @@ std::string LogicalInsert::ToString(size_t indent) const {
 
 std::string LogicalCreateTable::ToString(size_t indent) const {
     std::ostringstream out;
-    out << Pad(indent) << "LogicalCreateTable(" << table_name_ << ", columns=" << columns_.size() << ")";
+    out << Pad(indent) << "LogicalCreateTable(" << table_name_ << ", columns=" << schema_.columns.size()
+        << ", keys=" << (schema_.primary_key.has_value() ? 1 : 0) + schema_.secondary_keys.size() << ")";
     return out.str();
 }
 

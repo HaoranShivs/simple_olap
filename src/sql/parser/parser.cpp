@@ -82,8 +82,35 @@ std::unique_ptr<CreateTableStatement> Parser::ParseCreateTable() {
     stmt->table_name = Expect(TokenType::IDENTIFIER, "Expected table name").text;
     Expect(TokenType::LPAREN, "Expected '(' after table name");
 
-    // 循环解析列定义
+    // 循环解析 create_item：列定义 或 表级键定义
     do {
+        // 表级 PRIMARY KEY (col, ...)
+        if (Peek().type == TokenType::PRIMARY) {
+            Consume(); // PRIMARY
+            Expect(TokenType::KEY, "Expected 'KEY' after PRIMARY");
+
+            KeyConstraint key;
+            key.type = KeyConstraint::Type::PRIMARY;
+            key.columns = ParseKeyColumnList();
+            stmt->keys.push_back(std::move(key));
+            continue;
+        }
+
+        // 表级 KEY [name] (col, ...)
+        if (Peek().type == TokenType::KEY) {
+            Consume(); // KEY
+
+            KeyConstraint key;
+            key.type = KeyConstraint::Type::SECONDARY;
+            if (Peek().type == TokenType::IDENTIFIER) {
+                key.name = Consume().text;
+            }
+            key.columns = ParseKeyColumnList();
+            stmt->keys.push_back(std::move(key));
+            continue;
+        }
+
+        // 列定义
         ColumnSchema col;
         col.column_id = static_cast<uint32_t>(stmt->columns.size());
         col.name = Expect(TokenType::IDENTIFIER, "Expected column name").text;
@@ -91,15 +118,35 @@ std::unique_ptr<CreateTableStatement> Parser::ParseCreateTable() {
         // 解析数据类型
         col.type = ParseDataType();
 
-        // 约束（PRIMARY KEY / NOT NULL）暂不支持：词法层未提供对应关键字
+        // 列级 PRIMARY KEY：统一转成表级约束，Binder 无需区分两种写法
+        if (Peek().type == TokenType::PRIMARY) {
+            Consume(); // PRIMARY
+            Expect(TokenType::KEY, "Expected 'KEY' after PRIMARY");
+
+            KeyConstraint key;
+            key.type = KeyConstraint::Type::PRIMARY;
+            key.columns.push_back(col.name);
+            stmt->keys.push_back(std::move(key));
+        }
+
         stmt->columns.push_back(std::move(col));
-    } while (Match(TokenType::COMMA)); // 如果有逗号，继续解析下一列
+    } while (Match(TokenType::COMMA)); // 如果有逗号，继续解析下一项
 
     Expect(TokenType::RPAREN, "Expected ')' after columns");
 
-    // 可选：解析 ORDER BY (sort_keys) ...
-
     return stmt;
+}
+
+std::vector<std::string> Parser::ParseKeyColumnList() {
+    Expect(TokenType::LPAREN, "Expected '(' in key definition");
+
+    std::vector<std::string> columns;
+    do {
+        columns.push_back(Expect(TokenType::IDENTIFIER, "Expected column name in key definition").text);
+    } while (Match(TokenType::COMMA));
+
+    Expect(TokenType::RPAREN, "Expected ')' after key columns");
+    return columns;
 }
 
 std::unique_ptr<InsertStatement> Parser::ParseInsert() {
