@@ -18,10 +18,6 @@ ExecValue PlanLiteralToExec(const PlanLiteralValue& value) {
     return std::get<std::string>(value);
 }
 
-bool IsComparison(PlanBinaryOp op) {
-    return op == PlanBinaryOp::EQ || op == PlanBinaryOp::GT || op == PlanBinaryOp::LT;
-}
-
 } // namespace
 
 ExecValue ReadExecValue(const ColumnData& column, uint32_t physical_row) {
@@ -164,15 +160,21 @@ ExecValue ExecBinary::Eval(const VectorBatch& batch, uint32_t physical_row) cons
     const ExecValue lhs = left_->Eval(batch, physical_row);
     const ExecValue rhs = right_->Eval(batch, physical_row);
 
-    if (IsComparison(op_)) {
+    if (IsPlanComparison(op_)) {
         const int cmp = CompareExecValues(lhs, rhs);
         switch (op_) {
         case PlanBinaryOp::EQ:
             return cmp == 0;
+        case PlanBinaryOp::NE:
+            return cmp != 0;
         case PlanBinaryOp::GT:
             return cmp > 0;
+        case PlanBinaryOp::GE:
+            return cmp >= 0;
         case PlanBinaryOp::LT:
             return cmp < 0;
+        case PlanBinaryOp::LE:
+            return cmp <= 0;
         default:
             break;
         }

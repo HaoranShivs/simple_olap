@@ -256,11 +256,20 @@ ExprPtr Parser::ParseComparisonExpression() {
         case TokenType::EQ:
             op = BinaryOpExpr::OpType::EQ;
             break;
+        case TokenType::NE:
+            op = BinaryOpExpr::OpType::NE;
+            break;
         case TokenType::GT:
             op = BinaryOpExpr::OpType::GT;
             break;
+        case TokenType::GE:
+            op = BinaryOpExpr::OpType::GE;
+            break;
         case TokenType::LT:
             op = BinaryOpExpr::OpType::LT;
+            break;
+        case TokenType::LE:
+            op = BinaryOpExpr::OpType::LE;
             break;
         default:
             break;

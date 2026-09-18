@@ -16,12 +16,17 @@ namespace simple_olap {
 using PlanLiteralValue = std::variant<int32_t, std::string, double>;
 
 // 计划期二元运算符，覆盖算术、比较与逻辑运算。
+// 比较运算与存储层 CmpOp 一一对应（EQ/NE/GT/GE/LT/LE），
+// 供执行期 SIMD 比较内核复用同一套语义。
 enum class PlanBinaryOp : uint8_t {
     ADD,
     SUB,
     EQ,
+    NE,
     GT,
+    GE,
     LT,
+    LE,
     AND,
     OR,
 };

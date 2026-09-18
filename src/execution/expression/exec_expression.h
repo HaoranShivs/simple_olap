@@ -34,6 +34,21 @@ ExecValue CastNumber(long double value, DataType type);
 // 比较两个 ExecValue：字符串按字典序，其余按数值；返回 -1 / 0 / 1。
 int CompareExecValues(const ExecValue& lhs, const ExecValue& rhs);
 
+// 判定计划二元运算符是否为比较运算（EQ/NE/GT/GE/LT/LE）。
+inline bool IsPlanComparison(PlanBinaryOp op) {
+    switch (op) {
+    case PlanBinaryOp::EQ:
+    case PlanBinaryOp::NE:
+    case PlanBinaryOp::GT:
+    case PlanBinaryOp::GE:
+    case PlanBinaryOp::LT:
+    case PlanBinaryOp::LE:
+        return true;
+    default:
+        return false;
+    }
+}
+
 // ---------- 表达式节点 ----------
 
 // 执行期表达式基类：只需实现「按行求值」。
@@ -88,6 +103,11 @@ class ExecLiteral final : public ExecExpression {
         return value_;
     }
 
+    // 只读访问器：供 VectorPredicateCompiler 在 Init 阶段一次性检查表达式树。
+    const ExecValue& GetValue() const noexcept {
+        return value_;
+    }
+
   private:
     ExecValue value_;
 };
@@ -99,6 +119,18 @@ class ExecBinary final : public ExecExpression {
         : ExecExpression(Type::BINARY, return_type), op_(op), left_(std::move(left)), right_(std::move(right)) {}
 
     ExecValue Eval(const VectorBatch& batch, uint32_t physical_row) const override;
+
+    // 只读访问器：供 VectorPredicateCompiler 在 Init 阶段一次性检查表达式树。
+    // 不转移所有权，返回的引用在表达式树生命周期内有效。
+    PlanBinaryOp GetOp() const noexcept {
+        return op_;
+    }
+    const ExecExpression& GetLeft() const noexcept {
+        return *left_;
+    }
+    const ExecExpression& GetRight() const noexcept {
+        return *right_;
+    }
 
   private:
     PlanBinaryOp op_;

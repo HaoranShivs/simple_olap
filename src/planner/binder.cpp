@@ -248,13 +248,16 @@ std::unique_ptr<BoundExpr> Binder::BindBinaryOp(const BinaryOpExpr& expr) {
     auto right = BindExpr(*expr.right);
 
     // 类型推导：
-    //   - 比较与逻辑运算（EQ/GT/LT/AND/OR）结果为布尔语义，统一用 INT32 表示
+    //   - 比较与逻辑运算（EQ/NE/GT/GE/LT/LE/AND/OR）结果为布尔语义，统一用 INT32 表示
     //   - 算术运算（ADD/SUB）任一侧为 DOUBLE 则结果为 DOUBLE，否则沿用左侧类型
     DataType dtype;
     switch (expr.op) {
     case BinaryOpExpr::OpType::EQ:
+    case BinaryOpExpr::OpType::NE:
     case BinaryOpExpr::OpType::GT:
+    case BinaryOpExpr::OpType::GE:
     case BinaryOpExpr::OpType::LT:
+    case BinaryOpExpr::OpType::LE:
     case BinaryOpExpr::OpType::AND:
     case BinaryOpExpr::OpType::OR:
         dtype = DataType::INT32;

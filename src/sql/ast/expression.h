@@ -62,8 +62,11 @@ struct BinaryOpExpr : public Expr {
         ADD,
         SUB,
         EQ,
+        NE,
         GT,
+        GE,
         LT,
+        LE,
         AND,
         OR /* ... */
     };
@@ -76,7 +79,7 @@ struct BinaryOpExpr : public Expr {
         : Expr(Type::BINARY_OP), op(op), left(std::move(left)), right(std::move(right)) {}
 
     std::string ToString() const override {
-        static const char* op_names[] = {"+", "-", "=", ">", "<", "AND", "OR"};
+        static const char* op_names[] = {"+", "-", "=", "!=", ">", ">=", "<", "<=", "AND", "OR"};
         return "(" + left->ToString() + " " + op_names[static_cast<int>(op)] + " " + right->ToString() + ")";
     }
 };

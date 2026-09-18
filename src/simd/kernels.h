@@ -1,5 +1,6 @@
 #pragma once
 
+#include "arithmetic_kernel.h"
 #include "compare_kernel.h"
 #include "cpu_features.h"
 
@@ -9,6 +10,9 @@ namespace simple_olap::simd {
 // scalar 版总是可用；avx2 版在非 x86 平台上是 no-op（不会被安装）。
 void InstallScalarCompareKernels(CompareKernels& kernels);
 void InstallAvx2CompareKernels(CompareKernels& kernels);
+
+void InstallScalarArithmeticKernels(ArithmeticKernels& kernels);
+void InstallAvx2ArithmeticKernels(ArithmeticKernels& kernels);
 
 // KernelRegistry：进程级单例，初始化时做一次 CPU 探测 + 后端选择，
 // 之后热路径只查表调用函数指针，不再执行 CPUID。
@@ -32,12 +36,17 @@ class KernelRegistry {
         return compare_;
     }
 
+    const ArithmeticKernels& arithmetic() const noexcept {
+        return arithmetic_;
+    }
+
   private:
     KernelRegistry();
 
     CpuFeatures cpu_features_;
     SimdBackend backend_ = SimdBackend::SCALAR;
     CompareKernels compare_;
+    ArithmeticKernels arithmetic_;
 };
 
 } // namespace simple_olap::simd

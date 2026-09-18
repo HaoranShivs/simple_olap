@@ -82,4 +82,8 @@ if(SIMPLE_OLAP_BUILD_BENCHMARK)
     # 注入项目根目录，使默认数据目录与 CWD 无关
     target_compile_definitions(bench_parallel_scan PRIVATE
         SIMPLE_OLAP_BENCH_ROOT_DIR="${CMAKE_SOURCE_DIR}")
+
+    # Projection 算术内核微基准（scalar vs AVX2 vs 旧逐行 variant 路径）
+    add_executable(bench_arith_kernel ${CMAKE_SOURCE_DIR}/benchmark/bench_arith_kernel.cpp)
+    target_link_libraries(bench_arith_kernel PRIVATE simple_olap_core)
 endif()
