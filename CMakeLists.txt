@@ -86,4 +86,30 @@ if(SIMPLE_OLAP_BUILD_BENCHMARK)
     # Projection 算术内核微基准（scalar vs AVX2 vs 旧逐行 variant 路径）
     add_executable(bench_arith_kernel ${CMAKE_SOURCE_DIR}/benchmark/bench_arith_kernel.cpp)
     target_link_libraries(bench_arith_kernel PRIVATE simple_olap_core)
+
+    # Sparse projection 微基准（mask -> gather -> SIMD vs 旧逐行物化）
+    add_executable(bench_sparse_projection ${CMAKE_SOURCE_DIR}/benchmark/bench_sparse_projection.cpp)
+    target_link_libraries(bench_sparse_projection PRIVATE simple_olap_core)
+
+    # Selection pipeline 微基准（mask-native vs selection-vector 往返）
+    add_executable(bench_selection_pipeline ${CMAKE_SOURCE_DIR}/benchmark/bench_selection_pipeline.cpp)
+    target_link_libraries(bench_selection_pipeline PRIVATE simple_olap_core)
+endif()
+
+# ---------- 可选：单元测试 ----------
+# 默认开启；用 -DSIMPLE_OLAP_BUILD_TESTS=OFF 关闭。
+option(SIMPLE_OLAP_BUILD_TESTS "Build test executables" ON)
+
+if(SIMPLE_OLAP_BUILD_TESTS)
+    # SelectionMask 不变式 + ForEachSetBit / SelectionCursor + compare kernel 一致性
+    add_executable(simd_compare_test ${CMAKE_SOURCE_DIR}/test/simd_compare_test.cpp)
+    target_link_libraries(simd_compare_test PRIVATE simple_olap_core)
+
+    # typed gather：scalar vs AVX2，覆盖各类型 / 选择率
+    add_executable(gather_kernel_test ${CMAKE_SOURCE_DIR}/test/gather_kernel_test.cpp)
+    target_link_libraries(gather_kernel_test PRIVATE simple_olap_core)
+
+    # mask-native 执行链：Filter / Projection / Aggregate 的 dense + sparse 路径
+    add_executable(mask_pipeline_test ${CMAKE_SOURCE_DIR}/test/mask_pipeline_test.cpp)
+    target_link_libraries(mask_pipeline_test PRIVATE simple_olap_core)
 endif()

@@ -48,8 +48,7 @@ class QueryResult {
             copy.columns.push_back(std::move(column));
         }
 
-        copy.sel_vector = batch.sel_vector;
-        copy.size = batch.size;
+        copy.CopySelectionFrom(batch);
 
         chunks.push_back(std::move(copy));
         affected_rows += batch.size;

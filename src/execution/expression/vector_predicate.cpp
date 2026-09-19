@@ -8,10 +8,6 @@ namespace simple_olap {
 
 namespace {
 
-bool IsNumericType(DataType type) {
-    return type == DataType::INT32 || type == DataType::INT64 || type == DataType::FLOAT || type == DataType::DOUBLE;
-}
-
 // 把 kernel 结果限制到 input_mask 上，维持 output ⊆ input 不变式。
 inline void IntersectWithInput(simd::SelectionMask& output, const simd::SelectionMask& input) {
     output.And(input);
@@ -157,14 +153,13 @@ void ScalarVectorPredicate::Evaluate(const VectorBatch& batch, uint32_t physical
     }
 
     uint64_t* words = output_mask.data();
-    for (uint32_t row = 0; row < physical_count; ++row) {
-        if (!input_mask.Test(row)) {
-            continue;
-        }
+    // 只遍历输入 mask 的置位行：1024 行里只剩 30 行时，只做 30 次 Eval，
+    // 不再对全部物理行做 Test + continue。
+    input_mask.ForEachSetBit([&](uint32_t row) {
         if (ExecValueAsBool(expr_->Eval(batch, row))) {
             words[row >> 6] |= (uint64_t(1) << (row & 63));
         }
-    }
+    });
 }
 
 } // namespace simple_olap

@@ -38,11 +38,11 @@ void RunTypedCompare(const PreparedStoragePredicate& predicate, const VectorBatc
 
 void StorageRowFilter::Apply(const PreparedScanPredicates& prepared, const std::vector<uint8_t>& row_filter_mask,
                              VectorBatch& batch) {
-    const uint32_t physical_count = batch.size;
+    // 输入 batch 由 SegmentReader 产出，selection 必为 identity。
+    const uint32_t physical_count = batch.PhysicalSize();
 
     if (prepared.empty() || physical_count == 0) {
-        batch.sel_vector.clear();
-        batch.size = physical_count;
+        batch.SetIdentitySelection(physical_count);
         return;
     }
 
@@ -82,15 +82,12 @@ void StorageRowFilter::Apply(const PreparedScanPredicates& prepared, const std::
         }
     }
 
+    // selection 直接写回 batch：mask 就是唯一权威选择状态。
     if (final_mask.IsAll()) {
-        // identity selection：全部行通过，无需 sel_vector
-        batch.sel_vector.clear();
-        batch.size = physical_count;
-        return;
+        batch.SetIdentitySelection(physical_count);
+    } else {
+        batch.SetSelection(final_mask);
     }
-
-    final_mask.ToSelectionVector(batch.sel_vector);
-    batch.size = static_cast<uint32_t>(batch.sel_vector.size());
 }
 
 } // namespace simple_olap

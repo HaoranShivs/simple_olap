@@ -3,6 +3,7 @@
 #include "arithmetic_kernel.h"
 #include "compare_kernel.h"
 #include "cpu_features.h"
+#include "gather_kernel.h"
 
 namespace simple_olap::simd {
 
@@ -13,6 +14,9 @@ void InstallAvx2CompareKernels(CompareKernels& kernels);
 
 void InstallScalarArithmeticKernels(ArithmeticKernels& kernels);
 void InstallAvx2ArithmeticKernels(ArithmeticKernels& kernels);
+
+void InstallScalarGatherKernels(GatherKernels& kernels);
+void InstallAvx2GatherKernels(GatherKernels& kernels);
 
 // KernelRegistry：进程级单例，初始化时做一次 CPU 探测 + 后端选择，
 // 之后热路径只查表调用函数指针，不再执行 CPUID。
@@ -40,6 +44,10 @@ class KernelRegistry {
         return arithmetic_;
     }
 
+    const GatherKernels& gather() const noexcept {
+        return gather_;
+    }
+
   private:
     KernelRegistry();
 
@@ -47,6 +55,7 @@ class KernelRegistry {
     SimdBackend backend_ = SimdBackend::SCALAR;
     CompareKernels compare_;
     ArithmeticKernels arithmetic_;
+    GatherKernels gather_;
 };
 
 } // namespace simple_olap::simd

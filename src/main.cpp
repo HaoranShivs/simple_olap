@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "catalog/table_catalog_entry.h"
+#include "execution/batch_utils.h"
 #include "main/connection.h"
 #include "main/database.h"
 #include "main/query_result.h"
@@ -95,14 +96,12 @@ bool ReadSql(std::string& sql) {
 
 // 把一个 batch 的有效行打印成表格（列间以 " | " 分隔）
 void PrintBatch(const QueryResult& result, const VectorBatch& batch) {
-    const uint32_t row_count = batch.sel_vector.empty() ? batch.size : static_cast<uint32_t>(batch.sel_vector.size());
+    const uint32_t row_count = ActiveRowCount(batch);
     if (row_count == 0) {
         return;
     }
 
-    for (uint32_t logical_row = 0; logical_row < row_count; ++logical_row) {
-        const uint32_t physical_row = batch.sel_vector.empty() ? logical_row : batch.sel_vector[logical_row];
-
+    ForEachActiveRow(batch, [&](uint32_t physical_row) {
         std::cout << "  ";
         for (uint32_t c = 0; c < batch.columns.size(); ++c) {
             const ColumnData& col = batch.columns[c];
@@ -139,7 +138,7 @@ void PrintBatch(const QueryResult& result, const VectorBatch& batch) {
             }
         }
         std::cout << "\n";
-    }
+    });
 }
 
 void PrintResult(const QueryResult& result) {

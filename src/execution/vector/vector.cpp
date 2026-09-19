@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstring>
 
+#include "gather_utils.h"
+
 namespace simple_olap {
 
 // ==========================================
@@ -82,10 +84,7 @@ void ColumnData::Reset() {
 // VectorBatch 实现
 // ==========================================
 
-VectorBatch::VectorBatch(BufferPool* buffer_pool, bool is_view) : buffer_pool_(buffer_pool), is_view_(is_view) {
-    // 选择向量只 reserve 一次（约 4 KB），避免执行期反复分配。
-    sel_vector.reserve(BATCH_SIZE);
-}
+VectorBatch::VectorBatch(BufferPool* buffer_pool, bool is_view) : buffer_pool_(buffer_pool), is_view_(is_view) {}
 
 bool VectorBatch::is_view() const {
     return is_view_;
@@ -93,6 +92,29 @@ bool VectorBatch::is_view() const {
 
 uint32_t VectorBatch::ColumnCount() const {
     return static_cast<uint32_t>(columns.size());
+}
+
+uint32_t VectorBatch::PhysicalSize() const noexcept {
+    // selection.row_count() 是权威物理行数；未设置时退回列 count（构造中的 batch）。
+    if (selection_.row_count() != 0 || columns.empty()) {
+        return selection_.row_count();
+    }
+    return columns.front().count;
+}
+
+void VectorBatch::SetIdentitySelection(uint32_t physical_count) {
+    selection_.SetAll(physical_count);
+    size = physical_count;
+}
+
+void VectorBatch::SetSelection(const simd::SelectionMask& mask) {
+    selection_ = mask;
+    size = mask.Count();
+}
+
+void VectorBatch::CopySelectionFrom(const VectorBatch& source) {
+    selection_ = source.selection_;
+    size = source.size;
 }
 
 void VectorBatch::AddColumn(DataType type) {
@@ -103,28 +125,36 @@ void VectorBatch::Reset() {
     for (auto& col : columns) {
         col.Reset();
     }
-    sel_vector.clear();
+    columns.clear();
+    selection_.SetNone(0);
     size = 0;
 }
 
-void VectorBatch::CompactBySel() {
-    if (sel_vector.empty()) {
-        return; // identity selection
+void VectorBatch::CompactBySelection() {
+    if (IsDense()) {
+        return; // 已经是连续有效行
     }
 
-    const uint32_t new_count = static_cast<uint32_t>(sel_vector.size());
-    for (auto& col : columns) {
-        const size_t elem_size = TypeElemSize(col.type);
-        const size_t bytes = static_cast<size_t>(new_count) * elem_size;
+    const uint32_t new_count = size;
 
-        BufferHandle compact = buffer_pool_->Acquire(bytes);
-        for (uint32_t i = 0; i < new_count; ++i) {
-            std::memcpy(compact.data() + static_cast<size_t>(i) * elem_size,
-                        col.buffer + static_cast<size_t>(sel_vector[i]) * elem_size, elem_size);
+    if (new_count == 0) {
+        for (auto& col : columns) {
+            col.Reset();
         }
-        col.ReplaceWith(std::move(compact), new_count);
+        selection_.SetNone(0);
+        size = 0;
+        return;
     }
-    sel_vector.clear();
+
+    for (auto& col : columns) {
+        ColumnData compact(col.type, buffer_pool_);
+        compact.Resize(new_count);
+        GatherColumnDense(col, selection_, compact);
+        col = std::move(compact);
+    }
+
+    // 压缩后所有行连续有效：重新成为 dense batch。
+    selection_.SetAll(new_count);
     size = new_count;
 }
 } // namespace simple_olap

@@ -237,9 +237,7 @@ bool SegmentReader::GetVectorBatch(const ScanOptions& scanoptions, uint32_t offs
     }
 
     // 重建 output 的列结构（列顺序与 out_columns 一致）
-    output.columns.clear();
-    output.sel_vector.clear();
-    output.size = 0;
+    output.Reset();
     for (ColumnId col_id : out_columns) {
         output.AddColumn(GetColumnMeta(col_id).type);
     }
@@ -259,15 +257,15 @@ bool SegmentReader::GetVectorBatch(const ScanOptions& scanoptions, uint32_t offs
         col_data.CopyFrom(col_start, scan_count, true);
     }
 
-    output.size = scan_count;
+    // 扫描产出的 batch 天然是 identity selection：所有物理行都有效。
+    // StorageRowFilter 会在此基础上写入下推谓词结果。
+    output.SetIdentitySelection(scan_count);
     return scan_count > 0;
 }
 
 bool SegmentReader::GatherRows(const std::vector<uint32_t>& row_offsets, const std::vector<ColumnId>& columns,
                                VectorBatch& output) {
-    output.columns.clear();
-    output.sel_vector.clear();
-    output.size = 0;
+    output.Reset();
 
     if (row_offsets.empty() || columns.empty()) {
         return false;
@@ -303,7 +301,7 @@ bool SegmentReader::GatherRows(const std::vector<uint32_t>& row_offsets, const s
         }
     }
 
-    output.size = count;
+    output.SetIdentitySelection(count);
     return true;
 }
 

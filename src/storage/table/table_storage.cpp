@@ -345,7 +345,8 @@ bool TableStorage::ScanSegment(SegmentId segment_id, const ScanOptions& options,
 
     // 非常重要：
     // cursor 必须按“扫描的物理行数”前进，而不是过滤后的有效行数。
-    const uint32_t physical_rows = output.size;
+    // GetVectorBatch 已把 selection 设为 identity，PhysicalSize == 扫描行数。
+    const uint32_t physical_rows = output.PhysicalSize();
     cursor.offset += physical_rows;
 
     // =====================================
@@ -365,17 +366,16 @@ bool TableStorage::ScanSegment(SegmentId segment_id, const ScanOptions& options,
             throw std::runtime_error("scan predicates not prepared before ScanSegment");
         }
 
-        // SIMD/scalar 类型化比较 -> SelectionMask AND -> sel_vector
+        // SIMD/scalar 类型化比较 -> SelectionMask AND -> batch.selection
         StorageRowFilter::Apply(*cursor.prepared_predicates, cursor.row_filter_mask, output);
 
         if (output.size == 0) {
             // 本批全部被过滤：调用方继续读下一批
             return true;
         }
-    } else {
-        // 所有 pushed predicate 对该 segment 都 ALL_MATCH
-        output.sel_vector.clear();
     }
+    // else：所有 pushed predicate 对该 segment 都 ALL_MATCH。
+    // GetVectorBatch 产出的 batch 本来就是 identity selection，无需处理。
 
     return true;
 }

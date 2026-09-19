@@ -2,6 +2,7 @@
 
 #include "../../common/constants.h"
 #include "../../memory/buffer_pool/buffer_pool.h"
+#include "../../simd/selection_mask.h"
 #include "../../type.h"
 #include <cstdint>
 #include <utility>
@@ -16,7 +17,7 @@ namespace simple_olap {
 //     外部数据生命周期由提供方保证。
 //   - 实际内存（is_view() == false）：buffer 指向 BufferPool 分配的 owned_buffer_，
 //     数据由本对象持有（BufferHandle 析构 / Reset 时归还 BufferPool）。
-// 视图需要就地修改（如按选择向量压缩）时，先用 Materialize() 转为持有。
+// 视图需要就地修改（如按选择掩码压缩）时，先用 Materialize() 转为持有。
 struct ColumnData {
     ColumnData() = default;
 
@@ -77,6 +78,27 @@ struct ColumnData {
 //
 // 所有执行期 VectorBatch 必须绑定 BufferPool（buffer_pool_），
 // 使各列的实际内存模式走 BufferPool 而非系统分配。
+//
+// ============================================================
+// 强不变式（所有会产出 batch 的模块必须遵守）
+// ============================================================
+//
+//   selection.row_count() == physical row count
+//   size                  == active row count
+//
+//   dense（selection.IsAll()）:
+//       size == physical_count
+//       所有 ColumnData.count == physical_count
+//
+//   sparse（!selection.IsAll()）:
+//       size == selection.Count()
+//       所有 ColumnData.count == physical_count（列仍是完整物理列）
+//
+//   gather / materialize 之后：
+//       physical_count = active_count
+//       selection = ALL，重新成为 dense batch
+//
+// SelectionMask 是执行期唯一权威的行选择表达；不再维护 sel_vector 副本。
 class VectorBatch {
   public:
     explicit VectorBatch(BufferPool* buffer_pool = nullptr, bool is_view = true);
@@ -85,9 +107,8 @@ class VectorBatch {
 
     // ---------- 公共成员 ----------
 
-    std::vector<ColumnData> columns;  // 各列数据
-    std::vector<uint32_t> sel_vector; // 选择向量：有效行的 physical 局部索引
-    uint32_t size = 0;                // 当前 batch 有效行数
+    std::vector<ColumnData> columns; // 各列数据
+    uint32_t size = 0;               // active row count
 
     bool is_view() const;
 
@@ -95,16 +116,48 @@ class VectorBatch {
         return buffer_pool_;
     }
 
+    // ---------- Selection ----------
+
+    const simd::SelectionMask& selection() const noexcept {
+        return selection_;
+    }
+
+    // 物理行数（= selection.row_count()）。batch 未设置 selection 时退回列 count。
+    uint32_t PhysicalSize() const noexcept;
+
+    uint32_t ActiveSize() const noexcept {
+        return size;
+    }
+
+    // dense：所有物理行都是有效行。
+    bool IsDense() const noexcept {
+        return selection_.IsAll();
+    }
+
+    bool Empty() const noexcept {
+        return size == 0;
+    }
+
+    // 全选：size == physical_count，selection = ALL。
+    void SetIdentitySelection(uint32_t physical_count);
+
+    // 设置稀疏 selection：要求 mask.row_count() == physical row count。
+    void SetSelection(const simd::SelectionMask& mask);
+
+    // 从另一个 batch 原样拷贝 selection（视图投影等零拷贝路径使用）。
+    void CopySelectionFrom(const VectorBatch& source);
+
+    // ---------- 结构 ----------
+
     // 添加一列
     void AddColumn(DataType type);
 
     // 重置 batch 状态（owned buffer 归还 BufferPool，减少分配）
     void Reset();
 
-    // 按 sel_vector 就地压缩各列：只保留选中行，并更新 size。
-    // 视图模式下压缩会隐式物化（选中行被拷贝进各列 BufferPool 缓冲），
-    // 因为视图指向的外部内存不可写且不能只保留部分行。
-    void CompactBySel();
+    // 按 selection 就地压缩各列：只保留选中行（sparse -> dense），
+    // 压缩后 selection = ALL、size = 原 active count。
+    void CompactBySelection();
 
     uint32_t ColumnCount() const;
 
@@ -112,5 +165,8 @@ class VectorBatch {
     BufferPool* buffer_pool_ = nullptr;
 
     bool is_view_;
+
+    // 行选择状态（唯一真源）。
+    simd::SelectionMask selection_;
 };
 } // namespace simple_olap

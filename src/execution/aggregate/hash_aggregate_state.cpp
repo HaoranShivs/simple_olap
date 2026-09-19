@@ -144,16 +144,15 @@ void HashAggregateState::CombineAggregate(const AggCallSpec& call, AggState& dst
 }
 
 void HashAggregateState::Consume(VectorBatch& batch) {
-    const uint32_t active = ActiveRowCount(batch);
-    for (uint32_t logical = 0; logical < active; ++logical) {
-        const uint32_t physical = ActiveRowIndex(batch, logical);
+    // dense 走连续 for，sparse 走 mask 置位遍历；不再经过 logical -> physical 查表。
+    ForEachActiveRow(batch, [&](uint32_t physical) {
         GroupKey key = EvalGroupKey(batch, physical);
         auto [it, inserted] = groups_.try_emplace(std::move(key), MakeStates());
         auto& states = it->second;
         for (uint32_t i = 0; i < static_cast<uint32_t>(agg_calls_->size()); ++i) {
             UpdateAggregate((*agg_calls_)[i], states[i], batch, physical);
         }
-    }
+    });
 }
 
 void HashAggregateState::Merge(HashAggregateState&& other) {
@@ -211,8 +210,7 @@ bool HashAggregateState::NextResult(VectorBatch& output) {
         }
     }
 
-    output.size = row_count;
-    output.sel_vector.clear();
+    output.SetIdentitySelection(row_count);
     return row_count > 0;
 }
 

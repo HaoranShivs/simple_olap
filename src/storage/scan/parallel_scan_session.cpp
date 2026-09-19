@@ -80,7 +80,7 @@ void ParallelScanSession::ScanWorkerLoop() {
                     return;
                 }
 
-                if (batch.size > 0 || !batch.columns.empty()) {
+                if (batch.size > 0) {
                     // 队列满时阻塞（背压）；Cancel/Close 后 Push 返回 false
                     if (!queue_.Push(std::move(batch))) {
                         return;

@@ -108,18 +108,51 @@ uint32_t SelectionMask::Count() const {
 
 void SelectionMask::ToSelectionVector(std::vector<uint32_t>& output) const {
     output.clear();
-    const uint32_t word_count = (row_count_ + kWordBits - 1) / kWordBits;
-    for (uint32_t w = 0; w < word_count; ++w) {
-        uint64_t bits = words_[w];
-        while (bits != 0) {
-            const uint32_t bit = static_cast<uint32_t>(__builtin_ctzll(bits));
-            const uint32_t row = w * kWordBits + bit;
-            if (row < row_count_) {
-                output.push_back(row);
-            }
-            bits &= bits - 1; // 清最低置位
+    ForEachSetBit([&output](uint32_t row) { output.push_back(row); });
+}
+
+// ==========================================
+// SelectionCursor
+// ==========================================
+
+bool SelectionCursor::EnsureBits() {
+    if (remaining_bits_ != 0) {
+        return true;
+    }
+
+    // 从 next_word_ 起找下一个非零 word（skip 全零 word）。
+    const uint32_t word_count = (mask_->row_count() + SelectionMask::kWordBits - 1) / SelectionMask::kWordBits;
+    while (next_word_ < word_count) {
+        const uint64_t bits = mask_->data()[next_word_];
+        ++next_word_;
+        if (bits != 0) {
+            remaining_bits_ = bits;
+            remaining_word_ = next_word_ - 1;
+            return true;
         }
     }
+    return false;
+}
+
+bool SelectionCursor::Next(uint32_t& row) {
+    if (!EnsureBits()) {
+        return false;
+    }
+
+    const uint32_t bit = static_cast<uint32_t>(__builtin_ctzll(remaining_bits_));
+    remaining_bits_ &= remaining_bits_ - 1; // 清最低置位
+    row = remaining_word_ * SelectionMask::kWordBits + bit;
+    return true;
+}
+
+uint32_t SelectionCursor::NextBlock(uint32_t* indices, uint32_t capacity) {
+    uint32_t emitted = 0;
+    while (emitted < capacity && EnsureBits()) {
+        const uint32_t bit = static_cast<uint32_t>(__builtin_ctzll(remaining_bits_));
+        remaining_bits_ &= remaining_bits_ - 1;
+        indices[emitted++] = remaining_word_ * SelectionMask::kWordBits + bit;
+    }
+    return emitted;
 }
 
 bool SelectionMask::Test(uint32_t row) const {

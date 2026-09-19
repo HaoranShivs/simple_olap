@@ -8,53 +8,39 @@ namespace simple_olap {
 
 // 统一 Batch 语义（全执行期不变式）：
 //
-//   ColumnData::count   = physical row count
-//   VectorBatch::size    = active row count
+//   selection.row_count() == physical row count
+//   ColumnData::count      == physical row count
+//   VectorBatch::size      == active row count
 //
-//   sel_vector.empty():
-//       physical row == logical row
+//   dense（selection.IsAll()）:
 //       size == physical count
+//   sparse（!selection.IsAll()）:
+//       size == selection.Count()
 //
-//   !sel_vector.empty():
-//       size == sel_vector.size()
-//       ColumnData::count >= size
-//
-// 因此 ActiveRowCount 恒等于 batch.size；不再存在“sel_vector 更权威”
-// 之类的旧 storage 兼容逻辑。
+// SelectionMask 是唯一权威 selection；不再有 selection vector 副本。
 inline uint32_t ActiveRowCount(const VectorBatch& batch) {
     return batch.size;
 }
 
-inline uint32_t ActiveRowIndex(const VectorBatch& batch, uint32_t logical_row) {
-    return batch.sel_vector.empty() ? logical_row : batch.sel_vector[logical_row];
-}
-
 inline uint32_t PhysicalRowCount(const VectorBatch& batch) {
-    if (!batch.columns.empty()) {
-        return batch.columns.front().count;
-    }
-    return batch.size;
+    return batch.PhysicalSize();
 }
 
-inline bool IsIdentitySelection(const std::vector<uint32_t>& sel, uint32_t physical_count) {
-    if (sel.size() != physical_count) {
-        return false;
-    }
-    for (uint32_t i = 0; i < physical_count; ++i) {
-        if (sel[i] != i) {
-            return false;
+// 遍历有效行：dense 走最朴素的连续 for（不查 mask），sparse 走 mask 置位遍历。
+// 优化粒度保持在「行遍历」这一层，调用方不再关心 selection 表示。
+template <typename Func> inline void ForEachActiveRow(const VectorBatch& batch, Func&& fn) {
+    if (batch.IsDense()) {
+        const uint32_t count = batch.size;
+        for (uint32_t row = 0; row < count; ++row) {
+            fn(row);
         }
+    } else {
+        batch.selection().ForEachSetBit(fn);
     }
-    return true;
 }
 
 inline void ClearBatch(VectorBatch& batch) {
-    for (auto& col : batch.columns) {
-        col.Reset();
-    }
-    batch.columns.clear();
-    batch.sel_vector.clear();
-    batch.size = 0;
+    batch.Reset();
 }
 
 } // namespace simple_olap
