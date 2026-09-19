@@ -144,6 +144,36 @@ void HashAggregateState::CombineAggregate(const AggCallSpec& call, AggState& dst
 }
 
 void HashAggregateState::Consume(VectorBatch& batch) {
+    if (mode_ == AggregateMode::GLOBAL) {
+        ConsumeGlobal(batch);
+        return;
+    }
+
+    ConsumeGrouped(batch);
+}
+
+void HashAggregateState::ConsumeGlobal(VectorBatch& batch) {
+    const uint32_t active = ActiveRowCount(batch);
+
+    // COUNT(*) 只依赖有效行数：一个 batch 更新一次，不逐行 ++。
+    for (uint32_t idx : global_count_star_calls_) {
+        global_states_[idx].count += static_cast<int64_t>(active);
+    }
+
+    if (active == 0 || global_row_calls_.empty()) {
+        return;
+    }
+
+    // 其余聚合仍逐 active row 求值，但不再构造 GroupKey、不再查 hash 表。
+    // dense 走连续 for，sparse 走 mask 置位遍历。
+    ForEachActiveRow(batch, [&](uint32_t physical) {
+        for (uint32_t idx : global_row_calls_) {
+            UpdateAggregate((*agg_calls_)[idx], global_states_[idx], batch, physical);
+        }
+    });
+}
+
+void HashAggregateState::ConsumeGrouped(VectorBatch& batch) {
     // dense 走连续 for，sparse 走 mask 置位遍历；不再经过 logical -> physical 查表。
     ForEachActiveRow(batch, [&](uint32_t physical) {
         GroupKey key = EvalGroupKey(batch, physical);
@@ -156,6 +186,26 @@ void HashAggregateState::Consume(VectorBatch& batch) {
 }
 
 void HashAggregateState::Merge(HashAggregateState&& other) {
+    if (mode_ != other.mode_) {
+        throw std::runtime_error("HashAggregateState::Merge: aggregate mode mismatch");
+    }
+
+    if (mode_ == AggregateMode::GLOBAL) {
+        MergeGlobal(other);
+        return;
+    }
+
+    MergeGrouped(std::move(other));
+}
+
+void HashAggregateState::MergeGlobal(const HashAggregateState& other) {
+    // GLOBAL：每个调用只有一份中间态，直接 Combine，无 key 拷贝 / 无 hash 查找。
+    for (uint32_t i = 0; i < static_cast<uint32_t>(agg_calls_->size()); ++i) {
+        CombineAggregate((*agg_calls_)[i], global_states_[i], other.global_states_[i]);
+    }
+}
+
+void HashAggregateState::MergeGrouped(HashAggregateState&& other) {
     // worker Arena 中的 PMR 对象不能直接 move 成 coordinator Arena 的长期对象：
     // worker key 必须先拷贝进本 state 的 Arena（memory_），两个 Arena 完全解耦。
     for (auto& [source_key, source_states] : other.groups_) {
@@ -171,6 +221,41 @@ void HashAggregateState::Merge(HashAggregateState&& other) {
 }
 
 bool HashAggregateState::NextResult(VectorBatch& output) {
+    if (mode_ == AggregateMode::GLOBAL) {
+        return NextGlobalResult(output);
+    }
+
+    return NextGroupedResult(output);
+}
+
+bool HashAggregateState::NextGlobalResult(VectorBatch& output) {
+    // 全局聚合固定一个组，最多输出一行；空输入也输出（COUNT=0 / SUM=0 / ...）。
+    if (global_emitted_) {
+        ClearBatch(output);
+        return false;
+    }
+
+    ClearBatch(output);
+    for (const auto& spec : *outputs_) {
+        if (spec.kind != AggregateOutputSpec::Kind::AGGREGATE) {
+            throw std::runtime_error("HashAggregateState: GROUP_KEY output in global aggregate");
+        }
+        output.AddColumn(spec.type);
+        output.columns.back().Resize(1);
+    }
+
+    for (uint32_t col = 0; col < static_cast<uint32_t>(outputs_->size()); ++col) {
+        const auto& spec = (*outputs_)[col];
+        const ExecValue value = FinalizeAggregate((*agg_calls_)[spec.index], global_states_[spec.index]);
+        WriteExecValue(output.columns[col], 0, value);
+    }
+
+    output.SetIdentitySelection(1);
+    global_emitted_ = true;
+    return true;
+}
+
+bool HashAggregateState::NextGroupedResult(VectorBatch& output) {
     if (!emit_started_) {
         emit_started_ = true;
         emit_it_ = groups_.begin();

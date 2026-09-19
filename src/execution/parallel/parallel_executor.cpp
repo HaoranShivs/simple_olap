@@ -139,8 +139,6 @@ ExecutionResult ParallelExecutor::ExecuteAggregate(const PhysicalHashAggregate& 
 
                     HashAggregateState local(&spec.group_exprs, &spec.agg_calls, &arena);
                     local.set_outputs(&spec.outputs);
-                    // 无 GROUP BY：即使本 worker 没分到数据也要产出全局空组
-                    local.EnsureGlobalGroup();
 
                     VectorBatch batch(ctx_->buffer_pool);
                     while (pipeline.root->Next(batch)) {
@@ -174,7 +172,6 @@ ExecutionResult ParallelExecutor::ExecuteAggregate(const PhysicalHashAggregate& 
     Arena& coordinator_arena = ctx_->memory->CoordinatorArena();
     HashAggregateState global(&spec.group_exprs, &spec.agg_calls, &coordinator_arena);
     global.set_outputs(&spec.outputs);
-    global.EnsureGlobalGroup();
 
     std::exception_ptr error = nullptr;
     for (auto& future : futures) {

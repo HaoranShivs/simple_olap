@@ -75,6 +75,13 @@ flowchart TD
   `SelectionMask -> SelectionCursor -> typed gather -> dense 临时批 -> 现有 SIMD 算术内核`
   （`src/simd/gather_kernel.h`，scalar / AVX2 由 `KernelRegistry` 运行时派发）。
   优化粒度保持在 column/slot：一个不可向量化的标量表达式不会迫使其余列放弃 SIMD。
+- **Global Aggregate Fast Path**：无 `GROUP BY` 时不构造 `GroupKey`、不查 hash 表，
+  直接更新全局聚合中间态（`HashAggregateState::AggregateMode::GLOBAL`）；
+  其中 `COUNT(*)` 以 batch 为单位累加，不再逐行 `++`。空输入也输出一行
+  （COUNT=0 / SUM=0 / ...），single / multi 语义一致。
+- **AVX2 compare 64-row bitmap block**：每 64 行在寄存器中拼出一个完整 `uint64_t`
+  bitmap，full word 一次写入（消除 8/4 次 read-modify-write）；
+  对外 `CompareKernels` / `KernelRegistry` 接口不变。
 - **Arena 内存管理**：执行期内存按批分配、按查询整体释放，降低分配开销。
 - **并行执行**：通过 thread_pool 对 segment 级数据切片进行并行扫描与聚合。
 - **键索引**：`PRIMARY KEY` 在 `TableStorage::Append` 统一校验唯一性（任何写入口都无法绕过）；
@@ -88,13 +95,16 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
 # 正确性
-./build/bin/simd_compare_test      # kernel / SelectionMask / SelectionCursor
+./build/bin/simd_compare_test      # kernel / SelectionMask / SelectionCursor / 64-row 边界
 ./build/bin/gather_kernel_test     # typed gather: scalar vs AVX2，各选择率
 ./build/bin/mask_pipeline_test     # Filter/Projection/Aggregate 的 dense + sparse 路径
+./build/bin/global_aggregate_test  # 空表 / 过滤选择率 / expression / GROUP BY / single==multi
 
 # 性能
 ./build/bin/bench_selection_pipeline  # mask-native vs selection-vector 往返
 ./build/bin/bench_sparse_projection   # mask gather vs 旧逐行物化
+./build/bin/bench_compare_kernel      # scalar / 64-row bitmap block / 旧逐段|= 写法
+./build/bin/bench_global_aggregate    # hash 表路径 vs Global Fast Path
 ./build/bin/bench_arith_kernel        # projection 算术内核 micro-bench
 ./build/bin/bench_parallel_scan       # 并行扫描
 ```

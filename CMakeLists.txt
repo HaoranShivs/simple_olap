@@ -94,6 +94,14 @@ if(SIMPLE_OLAP_BUILD_BENCHMARK)
     # Selection pipeline 微基准（mask-native vs selection-vector 往返）
     add_executable(bench_selection_pipeline ${CMAKE_SOURCE_DIR}/benchmark/bench_selection_pipeline.cpp)
     target_link_libraries(bench_selection_pipeline PRIVATE simple_olap_core)
+
+    # AVX2 compare 微基准（scalar / 64-row bitmap block / 旧逐段 |= 写法）
+    add_executable(bench_compare_kernel ${CMAKE_SOURCE_DIR}/benchmark/bench_compare_kernel.cpp)
+    target_link_libraries(bench_compare_kernel PRIVATE simple_olap_core)
+
+    # Global aggregate 微基准（hash 表路径 vs Global Fast Path）
+    add_executable(bench_global_aggregate ${CMAKE_SOURCE_DIR}/benchmark/bench_global_aggregate.cpp)
+    target_link_libraries(bench_global_aggregate PRIVATE simple_olap_core)
 endif()
 
 # ---------- 可选：单元测试 ----------
@@ -112,4 +120,8 @@ if(SIMPLE_OLAP_BUILD_TESTS)
     # mask-native 执行链：Filter / Projection / Aggregate 的 dense + sparse 路径
     add_executable(mask_pipeline_test ${CMAKE_SOURCE_DIR}/test/mask_pipeline_test.cpp)
     target_link_libraries(mask_pipeline_test PRIVATE simple_olap_core)
+
+    # Global aggregate：空表 / 过滤选择率 / expression / GROUP BY / single==multi
+    add_executable(global_aggregate_test ${CMAKE_SOURCE_DIR}/test/global_aggregate_test.cpp)
+    target_link_libraries(global_aggregate_test PRIVATE simple_olap_core)
 endif()

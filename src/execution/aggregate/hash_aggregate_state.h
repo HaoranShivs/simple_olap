@@ -39,8 +39,23 @@ struct AggregateOutputSpec {
 // 构造时传入的 memory_resource（Arena）分配。worker 状态用 worker Arena，
 // 全局状态用 coordinator Arena；Merge 时把 worker key 拷贝进 coordinator
 // Arena，两个 Arena 完全解耦。
+//
+// 两种执行模式（构造时按 group_exprs 是否为空一次性确定）：
+//
+//   GLOBAL（无 GROUP BY）
+//       不构造 GroupKey、不查 hash 表；聚合状态直接更新 global_states_。
+//       COUNT(*) 在 batch 粒度聚合：count += active rows，而不是逐行 ++。
+//       始终存在一个全局组，因此空输入也产出一行（COUNT=0 / SUM=0 / ...）。
+//
+//   GROUPED_HASH（有 GROUP BY）
+//       原 GroupTable（pmr::unordered_map<GroupKey, StateVector>）路径，语义不变。
 class HashAggregateState {
   public:
+    enum class AggregateMode : uint8_t {
+        GLOBAL,       // 无 GROUP BY
+        GROUPED_HASH, // 有 GROUP BY
+    };
+
     // ---- 聚合中间态类型（跨线程传递部分 group 表时使用） ----
     // 一个分组键：各 GROUP BY 表达式的求值结果。
     struct GroupKey {
@@ -74,12 +89,27 @@ class HashAggregateState {
     // memory 为 PMR 资源（Arena），必须比 state 活得久。
     HashAggregateState(const std::vector<ExecExprPtr>* group_exprs, const std::vector<AggCallSpec>* agg_calls,
                        std::pmr::memory_resource* memory)
-        : group_exprs_(group_exprs), agg_calls_(agg_calls), memory_(memory), groups_(memory) {}
+        : group_exprs_(group_exprs), agg_calls_(agg_calls), memory_(memory),
+          mode_(group_exprs->empty() ? AggregateMode::GLOBAL : AggregateMode::GROUPED_HASH), groups_(memory),
+          global_states_(memory), global_count_star_calls_(memory), global_row_calls_(memory) {
+        if (mode_ == AggregateMode::GLOBAL) {
+            // 预编译一次：把 COUNT(*)（batch 级聚合）与需要逐行求值的调用分开。
+            global_states_.resize(agg_calls_->size());
+            for (uint32_t i = 0; i < static_cast<uint32_t>(agg_calls_->size()); ++i) {
+                const AggCallSpec& call = (*agg_calls_)[i];
+                if (call.type == AggType::COUNT && call.arg == nullptr) {
+                    global_count_star_calls_.push_back(i);
+                } else {
+                    global_row_calls_.push_back(i);
+                }
+            }
+        }
+    }
 
     HashAggregateState(HashAggregateState&& other) noexcept = default;
     HashAggregateState& operator=(HashAggregateState&& other) noexcept = default;
 
-    // 消费一个批次：把所有有效行聚合进本地 group 表
+    // 消费一个批次：把所有有效行聚合进本地状态。
     void Consume(VectorBatch& batch);
 
     // 按聚合语义合并另一份部分状态（worker -> 全局合并阶段）：
@@ -90,16 +120,14 @@ class HashAggregateState {
     //   MAX   : max(lhs, rhs)
     void Merge(HashAggregateState&& other);
 
-    // Finalize + emit：把 group 表按 BATCH_SIZE 分批物化输出。
-    // 返回 false 表示全部组已输出（EOF）。
+    // Finalize + emit：
+    //   GLOBAL       -> 最多输出 1 行（空输入也输出 COUNT=0 等空聚合值）
+    //   GROUPED_HASH -> 把 group 表按 BATCH_SIZE 分批物化输出
+    // 返回 false 表示全部结果已输出（EOF）。
     bool NextResult(VectorBatch& output);
 
-    // 无 GROUP BY 时调用：预置一个全局空组，
-    // 保证空输入时也能产出一个（空聚合值的）结果行。
-    void EnsureGlobalGroup() {
-        if (group_exprs_->empty()) {
-            groups_.try_emplace(GroupKey(memory_), MakeStates());
-        }
+    AggregateMode mode() const noexcept {
+        return mode_;
     }
 
     const std::vector<AggregateOutputSpec>* outputs() const {
@@ -118,6 +146,16 @@ class HashAggregateState {
     static ExecValue FinalizeAggregate(const AggCallSpec& call, const AggState& state);
     static void CombineAggregate(const AggCallSpec& call, AggState& dst, const AggState& src);
 
+    // ---- GLOBAL 模式 ----
+    void ConsumeGlobal(VectorBatch& batch);
+    void MergeGlobal(const HashAggregateState& other);
+    bool NextGlobalResult(VectorBatch& output);
+
+    // ---- GROUPED_HASH 模式 ----
+    void ConsumeGrouped(VectorBatch& batch);
+    void MergeGrouped(HashAggregateState&& other);
+    bool NextGroupedResult(VectorBatch& output);
+
     const std::vector<ExecExprPtr>* group_exprs_ = nullptr;
     const std::vector<AggCallSpec>* agg_calls_ = nullptr;
     const std::vector<AggregateOutputSpec>* outputs_ = nullptr;
@@ -125,9 +163,21 @@ class HashAggregateState {
     // PMR 资源（Arena）：GroupTable / GroupKey / StateVector 的分配来源。
     std::pmr::memory_resource* memory_ = nullptr;
 
+    // 构造时确定，热路径只在 batch 粒度分流一次。
+    AggregateMode mode_ = AggregateMode::GLOBAL;
+
+    // ---- GROUPED_HASH 状态 ----
     GroupTable groups_;
     GroupTable::iterator emit_it_{};
     bool emit_started_ = false;
+
+    // ---- GLOBAL 状态 ----
+    StateVector global_states_;
+    // 仅含 COUNT(*) 的调用：batch 级聚合，不逐行更新。
+    std::pmr::vector<uint32_t> global_count_star_calls_;
+    // 其余调用（COUNT(col) / SUM / AVG / MIN / MAX）：逐 active row 求值。
+    std::pmr::vector<uint32_t> global_row_calls_;
+    bool global_emitted_ = false;
 };
 
 } // namespace simple_olap

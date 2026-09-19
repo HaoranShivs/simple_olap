@@ -9,9 +9,12 @@
 //   2. SelectionMask 基本不变式（SetAll/SetNone/Count/And/Or/AndNot/ToSelectionVector）
 //   3. scalar 与 AVX2 CompareKernel 对全部 CmpOp × 4 类型结果一致
 //   4. INT64 > 2^53 时不再经过 double（精度修复验证）
+//   5. AVX2 64-row bitmap block：系统化边界 count（0/1/3/.../64/65/.../1024）
+//      × const/column × 4 类型 × 6 种 CmpOp，含 NaN / ±Inf / ±0
 
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <vector>
 
 #include "simd/kernels.h"
@@ -189,15 +192,121 @@ static void TestConst(const char* type_name, const CompareKernels& scalar, const
             Fail(buf);
         }
 
-        // 3) 末尾 bit 必须为 0
+        // 3) 末尾 bit 必须为 0（直接看原始 bit，Test() 会因 row_count 掩盖）
         if (have_avx2) {
-            for (uint32_t i = n; i < n + 8 && i < SelectionMask::kWordCount * SelectionMask::kWordBits; ++i) {
-                if (am.Test(i)) {
+            for (uint32_t i = n; i < SelectionMask::kWordCount * SelectionMask::kWordBits; ++i) {
+                if (((am.data()[i >> 6] >> (i & 63)) & 1ULL) != 0) {
                     Fail("avx2 tail bits not cleared");
                     break;
                 }
             }
         }
+    }
+}
+
+// ---------- 64-row block 边界测试 ----------
+//
+// 覆盖所有跨越 8 / 4 / 64 行的边界 count，对每种类型验证：
+//   1) scalar 后端与逐元素 typed 语义一致
+//   2) AVX2 后端与 scalar 后端逐 bit 一致
+//   3) [count, kWordCount*64) 的原始 bit 必须为 0（不能只看 Test()）
+static const uint32_t kBoundaryCounts[] = {0,  1,  3,  4,  7,  8,   15,  16,  31,  32,
+                                           63, 64, 65, 71, 72, 127, 128, 129, 1023, 1024};
+
+static bool RawBitSet(const SelectionMask& mask, uint32_t row) {
+    return ((mask.data()[row >> 6] >> (row & 63)) & 1ULL) != 0;
+}
+
+template <typename T, typename ConstFn, typename ColumnFn>
+static void TestBoundaries(const char* name, const CompareKernels& scalar, const CompareKernels& avx2, bool have_avx2,
+                           const std::vector<T>& lhs, const std::vector<T>& rhs, ConstFn scalar_const,
+                           ConstFn avx2_const, ColumnFn scalar_col, ColumnFn avx2_col) {
+    for (uint32_t n : kBoundaryCounts) {
+        if (n > lhs.size()) {
+            continue;
+        }
+
+        for (CmpOp op : kOps) {
+            // ---- const compare（rhs 取中间元素，覆盖浮点特殊值） ----
+            const T constant = lhs[n / 2];
+            SelectionMask sm;
+            scalar_const(lhs.data(), n, op, constant, sm);
+            for (uint32_t i = 0; i < n; ++i) {
+                if (sm.Test(i) != CompareTypedValue<T>(lhs[i], op, constant)) {
+                    char buf[160];
+                    std::snprintf(buf, sizeof(buf), "%s boundary const %s: scalar != typed (count=%u row=%u)", name,
+                                  OpName(op), n, i);
+                    Fail(buf);
+                    break;
+                }
+            }
+
+            if (have_avx2) {
+                SelectionMask am;
+                avx2_const(lhs.data(), n, op, constant, am);
+                if (!MaskEquals(sm, am, n)) {
+                    char buf[160];
+                    std::snprintf(buf, sizeof(buf), "%s boundary const %s: avx2 != scalar (count=%u)", name,
+                                  OpName(op), n);
+                    Fail(buf);
+                }
+                for (uint32_t i = n; i < SelectionMask::kWordCount * SelectionMask::kWordBits; ++i) {
+                    if (RawBitSet(am, i)) {
+                        Fail("boundary const: avx2 tail bits not cleared");
+                        break;
+                    }
+                }
+            }
+
+            // ---- column compare ----
+            SelectionMask sc;
+            scalar_col(lhs.data(), rhs.data(), n, op, sc);
+            for (uint32_t i = 0; i < n; ++i) {
+                if (sc.Test(i) != CompareTypedValue<T>(lhs[i], op, rhs[i])) {
+                    char buf[160];
+                    std::snprintf(buf, sizeof(buf), "%s boundary column %s: scalar != typed (count=%u row=%u)", name,
+                                  OpName(op), n, i);
+                    Fail(buf);
+                    break;
+                }
+            }
+
+            if (have_avx2) {
+                SelectionMask ac;
+                avx2_col(lhs.data(), rhs.data(), n, op, ac);
+                if (!MaskEquals(sc, ac, n)) {
+                    char buf[160];
+                    std::snprintf(buf, sizeof(buf), "%s boundary column %s: avx2 != scalar (count=%u)", name,
+                                  OpName(op), n);
+                    Fail(buf);
+                }
+                for (uint32_t i = n; i < SelectionMask::kWordCount * SelectionMask::kWordBits; ++i) {
+                    if (RawBitSet(ac, i)) {
+                        Fail("boundary column: avx2 tail bits not cleared");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// 浮点特殊值数组：NaN / +Inf / -Inf / +0 / -0 交替出现，
+// 确保 64-row 重构没有改变当前浮点比较语义（EQ/NE 对 NaN 的行为等）。
+template <typename T> static T FloatSpecial(uint32_t row, T ordinary) {
+    switch (row % 8u) {
+    case 0:
+        return std::numeric_limits<T>::quiet_NaN();
+    case 1:
+        return std::numeric_limits<T>::infinity();
+    case 2:
+        return -std::numeric_limits<T>::infinity();
+    case 3:
+        return T(0);
+    case 4:
+        return -T(0);
+    default:
+        return ordinary;
     }
 }
 
@@ -307,6 +416,50 @@ int main() {
                 Fail("int32 tail count mismatch");
             }
         }
+    }
+
+    // ---------- 64-row block 边界：INT32 ----------
+    {
+        std::vector<int32_t> rhs32(kN);
+        for (uint32_t i = 0; i < kN; ++i) {
+            rhs32[i] = i32[(i * 7u + 3u) % kN];
+        }
+        TestBoundaries<int32_t>("int32", scalar, avx2, have_avx2, i32, rhs32, scalar.i32_const, avx2.i32_const,
+                                scalar.i32_column, avx2.i32_column);
+    }
+
+    // ---------- 64-row block 边界：INT64 ----------
+    {
+        std::vector<int64_t> rhs64(kN);
+        for (uint32_t i = 0; i < kN; ++i) {
+            rhs64[i] = i64[(i * 7u + 3u) % kN];
+        }
+        TestBoundaries<int64_t>("int64", scalar, avx2, have_avx2, i64, rhs64, scalar.i64_const, avx2.i64_const,
+                                scalar.i64_column, avx2.i64_column);
+    }
+
+    // ---------- 64-row block 边界：FLOAT（含 NaN / ±Inf / ±0） ----------
+    {
+        std::vector<float> f32s(kN);
+        std::vector<float> f32r(kN);
+        for (uint32_t i = 0; i < kN; ++i) {
+            f32s[i] = FloatSpecial<float>(i, static_cast<float>(i) * 0.5f - 100.0f);
+            f32r[i] = FloatSpecial<float>(i + 3u, static_cast<float>(i) * 0.25f - 10.0f);
+        }
+        TestBoundaries<float>("float", scalar, avx2, have_avx2, f32s, f32r, scalar.f32_const, avx2.f32_const,
+                              scalar.f32_column, avx2.f32_column);
+    }
+
+    // ---------- 64-row block 边界：DOUBLE（含 NaN / ±Inf / ±0） ----------
+    {
+        std::vector<double> f64s(kN);
+        std::vector<double> f64r(kN);
+        for (uint32_t i = 0; i < kN; ++i) {
+            f64s[i] = FloatSpecial<double>(i, static_cast<double>(i) * 0.25 - 64.0);
+            f64r[i] = FloatSpecial<double>(i + 5u, static_cast<double>(i) * 0.125 - 8.0);
+        }
+        TestBoundaries<double>("double", scalar, avx2, have_avx2, f64s, f64r, scalar.f64_const, avx2.f64_const,
+                               scalar.f64_column, avx2.f64_column);
     }
 
     if (g_failures == 0) {
