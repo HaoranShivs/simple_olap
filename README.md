@@ -102,12 +102,43 @@ cmake --build build -j
 
 # 性能
 ./build/bin/bench_selection_pipeline  # mask-native vs selection-vector 往返
-./build/bin/bench_sparse_projection   # mask gather vs 旧逐行物化
+./build/bin/bench_sparse_projection   # mask gather vs 旧逐行物化（kernel-only / pipeline）
 ./build/bin/bench_compare_kernel      # scalar / 64-row bitmap block / 旧逐段|= 写法
-./build/bin/bench_global_aggregate    # hash 表路径 vs Global Fast Path
+./build/bin/bench_global_aggregate    # hash 表路径 vs Global Fast Path（consume / full）
 ./build/bin/bench_arith_kernel        # projection 算术内核 micro-bench
-./build/bin/bench_parallel_scan       # 并行扫描
+./build/bin/bench_perf_counters       # perf_event_open: cycles / IPC / LLC miss / branch miss
+./build/bin/bench_parallel_scan       # 并行扫描（input/output rows/s + median speedup）
+
+# 端到端查询 + 统一实验矩阵
+./build/bin/bench_query_workload      # engine / prepared / materialized QPS + P50/P95/P99 + 内存池增量
+./benchmark/verify_simd.sh            # scalar/AVX2、single/multi 的 ResultDigest 正确性校验
+./benchmark/run_perf_suite.sh         # 一键跑 QPS / 并行扩展 / AVX2 / 内存消融，输出 CSV
+./benchmark/run_perf_suite.sh --quick # 快速自检（小数据 / 短时长）
 ```
+
+`bench_query_workload` 是唯一的端到端计时口径，并把三条路径严格分开：
+
+| `--result-mode` | 计时区间 | 含义 |
+| --- | --- | --- |
+| `engine` | `Connection::Execute(sql, consumer)` | SQL 前端 + planning + execution（blackhole consumer，不物化结果） |
+| `prepared` | `Connection::Execute(prepared, consumer)` | execution-only（planning 在测量前完成） |
+| `materialized` | `Connection::Query(sql)` | engine + `QueryResult` 全量深拷贝 |
+
+`both`（默认）同时报告 engine 与 materialized，`all` 再加 prepared。
+每个 client 独立记录 latency 样本，结束后 merge；QPS = 窗口内完成 query 数 /
+真实 elapsed；P99 样本不足 1000 时明确标记 `insufficient samples`。测量前用与
+行序无关的 `ResultDigest` 校验三条路径结果一致，否则 abort。它使用固定数据集
+`perf_data`（`id / group_low / group_high / value / value2`，无索引）与固定 5 条
+workload（见源文件头注释）。
+
+AVX2 A/B 与内存消融均由 `run_perf_suite.sh` 用同一二进制、独立进程完成，且
+A/B 顺序按轮次交错，避免固定顺序偏差：
+
+- AVX2：`SIMPLE_OLAP_FORCE_SCALAR=1` vs 默认；
+- 内存：`M0` system + direct BufferPool → `M1` Arena → `M2` Arena + BlockPool
+  → `M3` + BufferPool（`--memory` / `--buffer-mode` 切换）；
+- CSV 列与按配置 median 的汇总见 `benchmark/results/`，详细说明见
+  `benchmark/README.md`。
 
 ## 键语法
 

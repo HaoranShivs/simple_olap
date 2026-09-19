@@ -4,3 +4,6 @@ benchmark/bench_data/
 my_planner.tar
 *:Zone.Identifier
 .clang-format
+
+# benchmark results
+benchmark/results/

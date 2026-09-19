@@ -82,6 +82,7 @@ size_t BlockPool::cached_blocks() const noexcept {
 BlockPoolStats BlockPool::stats() const noexcept {
     BlockPoolStats result;
     result.system_allocations = system_allocations_.load(std::memory_order_relaxed);
+    result.system_deallocations = system_deallocations_.load(std::memory_order_relaxed);
     result.pool_hits = pool_hits_.load(std::memory_order_relaxed);
     result.pool_returns = pool_returns_.load(std::memory_order_relaxed);
 
@@ -113,6 +114,7 @@ void BlockPool::FreeBlock(MemoryBlock& block) noexcept {
     }
 
     ::operator delete(block.data, std::align_val_t{kAlignment});
+    system_deallocations_.fetch_add(1, std::memory_order_relaxed);
     block.data = nullptr;
     block.capacity = 0;
     block.pooled = false;

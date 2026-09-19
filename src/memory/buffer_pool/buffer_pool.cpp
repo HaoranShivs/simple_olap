@@ -60,7 +60,8 @@ inline size_t AlignUp(size_t value, size_t alignment) noexcept {
 
 } // namespace
 
-BufferPool::BufferPool(size_t max_cached_per_class) : max_cached_per_class_(max_cached_per_class) {}
+BufferPool::BufferPool(size_t max_cached_per_class, BufferPoolMode mode)
+    : max_cached_per_class_(max_cached_per_class), mode_(mode) {}
 
 BufferPool::~BufferPool() {
     for (FreeList& free_list : free_lists_) {
@@ -72,6 +73,14 @@ BufferPool::~BufferPool() {
 }
 
 BufferHandle BufferPool::Acquire(size_t min_capacity) {
+    // DIRECT：完全绕开 size class / freelist，每次直接向系统申请。
+    if (mode_ == BufferPoolMode::DIRECT) {
+        const size_t capacity = AlignUp(min_capacity, ALIGNMENT);
+        void* memory = ::operator new(capacity, std::align_val_t{ALIGNMENT});
+        system_allocations_.fetch_add(1, std::memory_order_relaxed);
+        return BufferHandle(this, static_cast<uint8_t*>(memory), capacity, UINT32_MAX);
+    }
+
     // 找到最小的能容纳请求的 size class。
     for (size_t i = 0; i < kClassCount; ++i) {
         if (min_capacity <= SIZE_CLASSES[i]) {
@@ -108,6 +117,7 @@ void BufferPool::Release(uint8_t* data, size_t capacity, uint32_t size_class) no
     if (size_class == UINT32_MAX) {
         // direct allocation：直接归还系统。
         ::operator delete(data, std::align_val_t{ALIGNMENT});
+        system_deallocations_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
 
@@ -124,13 +134,20 @@ void BufferPool::Release(uint8_t* data, size_t capacity, uint32_t size_class) no
 
     // cache 已满：直接归还系统。
     ::operator delete(data, std::align_val_t{ALIGNMENT});
+    system_deallocations_.fetch_add(1, std::memory_order_relaxed);
 }
 
 BufferPoolStats BufferPool::stats() const noexcept {
     BufferPoolStats result;
     result.system_allocations = system_allocations_.load(std::memory_order_relaxed);
+    result.system_deallocations = system_deallocations_.load(std::memory_order_relaxed);
     result.pool_hits = pool_hits_.load(std::memory_order_relaxed);
     result.pool_returns = pool_returns_.load(std::memory_order_relaxed);
+
+    for (const FreeList& free_list : free_lists_) {
+        std::lock_guard<std::mutex> lock(free_list.mutex);
+        result.cached_buffers += free_list.buffers.size();
+    }
     return result;
 }
 

@@ -13,12 +13,18 @@
 // 覆盖 count = 16 / 64 / 256 / 1024（跨 64-row block 边界），
 // 先逐 bit 验证 scalar == avx2 == old，再计时。
 //
+// 计时修正（BenchmarkSettingV2）：
+//   旧实现把 `g_sink += g_mask.Count()` 放进 timed function，等于把一次
+//   popcount 成本混进 kernel；count=16/64 时占比可观。现在 Count() 完全
+//   移出计时区间，只用 DoNotOptimize 阻止 mask 被优化掉。
+//
+// 计时使用统一 harness：warmup + samples + median/MAD + 固定种子随机顺序。
+//
 // 构建：
 //   cmake --build build --target bench_compare_kernel
 // 运行：
-//   ./build/bin/bench_compare_kernel [--iters N] [--verify-only]
+//   ./build/bin/bench_compare_kernel [--inner N] [--samples N] [--warmup N] [--verify-only]
 
-#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -27,6 +33,7 @@
 #include "../src/simd/kernels.h"
 #include "../src/simd/selection_mask.h"
 #include "../src/type.h"
+#include "bench_common.h"
 
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
 #include <immintrin.h>
@@ -37,15 +44,16 @@
 
 using namespace simple_olap;
 using namespace simple_olap::simd;
+using namespace simple_olap::bench;
 
 namespace {
-
-using Clock = std::chrono::steady_clock;
 
 constexpr uint32_t kN = 1024;
 
 struct Args {
-    uint32_t iters = 200000;
+    uint64_t inner = 20000;
+    uint32_t samples = 15;
+    uint32_t warmup = 3;
     bool verify_only = false;
 };
 
@@ -53,52 +61,34 @@ Args ParseArgs(int argc, char** argv) {
     Args a;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
-        if (arg == "--iters" && i + 1 < argc) {
-            a.iters = static_cast<uint32_t>(std::stoul(argv[++i]));
+        const auto next = [&]() -> std::string {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "missing value for %s\n", arg.c_str());
+                std::exit(1);
+            }
+            return argv[++i];
+        };
+        if (arg == "--inner" || arg == "--iters") {
+            a.inner = std::stoull(next());
+        } else if (arg == "--samples") {
+            a.samples = static_cast<uint32_t>(std::stoul(next()));
+        } else if (arg == "--warmup") {
+            a.warmup = static_cast<uint32_t>(std::stoul(next()));
         } else if (arg == "--verify-only") {
             a.verify_only = true;
+        } else {
+            std::fprintf(stderr, "unknown argument: %s\n", arg.c_str());
+            std::exit(1);
         }
     }
     return a;
 }
 
-double TimeNs(void (*fn)(), uint32_t iters) {
-    const auto t0 = Clock::now();
-    for (uint32_t i = 0; i < iters; ++i) {
-        fn();
-    }
-    const auto t1 = Clock::now();
-    return static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()) /
-           static_cast<double>(iters);
-}
-
-// 全局输入/输出，供无捕获函数指针计时使用。
 int32_t g_i32[kN];
 int64_t g_i64[kN];
 float g_f32[kN];
 double g_f64[kN];
 SelectionMask g_mask;
-uint64_t g_sink = 0;
-
-// 当前计时目标：类型 + count + 使用的 kernel。
-const CompareKernels* g_scalar = nullptr;
-const CompareKernels* g_avx2 = nullptr;
-uint32_t g_count = kN;
-
-#define DEFINE_TIMED(name, call_expr)                                                                              \
-    void name() {                                                                                                  \
-        call_expr;                                                                                                 \
-        g_sink += g_mask.Count();                                                                                  \
-    }
-
-DEFINE_TIMED(TimeScalarI32, g_scalar->i32_const(g_i32, g_count, CmpOp::GT, 1234, g_mask))
-DEFINE_TIMED(TimeAvx2I32, g_avx2->i32_const(g_i32, g_count, CmpOp::GT, 1234, g_mask))
-DEFINE_TIMED(TimeScalarI64, g_scalar->i64_const(g_i64, g_count, CmpOp::GT, 9007199254740992LL, g_mask))
-DEFINE_TIMED(TimeAvx2I64, g_avx2->i64_const(g_i64, g_count, CmpOp::GT, 9007199254740992LL, g_mask))
-DEFINE_TIMED(TimeScalarF32, g_scalar->f32_const(g_f32, g_count, CmpOp::GT, 0.0f, g_mask))
-DEFINE_TIMED(TimeAvx2F32, g_avx2->f32_const(g_f32, g_count, CmpOp::GT, 0.0f, g_mask))
-DEFINE_TIMED(TimeScalarF64, g_scalar->f64_const(g_f64, g_count, CmpOp::GT, 0.0, g_mask))
-DEFINE_TIMED(TimeAvx2F64, g_avx2->f64_const(g_f64, g_count, CmpOp::GT, 0.0, g_mask))
 
 #if BENCH_HAS_X86
 // ---------- 旧写法复刻：每 8/4 行 |= 一次同一 word ----------
@@ -180,12 +170,9 @@ __attribute__((target("avx2"))) void OldF64Const(const double* data, uint32_t co
         }
     }
 }
-
-DEFINE_TIMED(TimeOldI32, OldI32Const(g_i32, g_count, CmpOp::GT, 1234, g_mask))
-DEFINE_TIMED(TimeOldF64, OldF64Const(g_f64, g_count, CmpOp::GT, 0.0, g_mask))
 #endif // BENCH_HAS_X86
 
-bool MaskEqualRaw(const SelectionMask& a, const SelectionMask& b, uint32_t count) {
+bool MaskEqualRaw(const SelectionMask& a, const SelectionMask& b) {
     if (a.row_count() != b.row_count()) {
         return false;
     }
@@ -194,7 +181,6 @@ bool MaskEqualRaw(const SelectionMask& a, const SelectionMask& b, uint32_t count
             return false;
         }
     }
-    (void)count;
     return true;
 }
 
@@ -217,22 +203,21 @@ const char* OpName(CmpOp op) {
 }
 
 } // namespace
-
 int main(int argc, char** argv) {
     const Args args = ParseArgs(argc, argv);
 
     const KernelRegistry& reg = KernelRegistry::Instance();
     const bool have_avx2 = (reg.backend() == SimdBackend::AVX2);
-    std::printf("backend = %s, iters = %u\n\n", have_avx2 ? "AVX2" : "SCALAR", args.iters);
+    std::printf("backend = %s\n", have_avx2 ? "AVX2" : "SCALAR");
+    PrintEnvironment(QueryEnvironment());
+    std::printf("inner = %llu, warmup = %u, samples = %u\n\n", static_cast<unsigned long long>(args.inner),
+                args.warmup, args.samples);
 
     CompareKernels scalar;
     InstallScalarCompareKernels(scalar);
     CompareKernels avx2;
     InstallScalarCompareKernels(avx2);
     InstallAvx2CompareKernels(avx2);
-
-    g_scalar = &scalar;
-    g_avx2 = &avx2;
 
     for (uint32_t i = 0; i < kN; ++i) {
         g_i32[i] = static_cast<int32_t>(i) * 7 - 3000;
@@ -253,14 +238,14 @@ int main(int argc, char** argv) {
 
             scalar.i32_const(g_i32, count, op, 1234, sm);
             avx2.i32_const(g_i32, count, op, 1234, am);
-            if (!MaskEqualRaw(sm, am, count)) {
+            if (!MaskEqualRaw(sm, am)) {
                 std::printf("VERIFY FAILED: i32 %s count=%u\n", OpName(op), count);
                 return 1;
             }
 #if BENCH_HAS_X86
             if (have_avx2) {
                 OldI32Const(g_i32, count, op, 1234, om);
-                if (!MaskEqualRaw(om, am, count)) {
+                if (!MaskEqualRaw(om, am)) {
                     std::printf("VERIFY FAILED: old i32 %s count=%u\n", OpName(op), count);
                     return 1;
                 }
@@ -269,14 +254,14 @@ int main(int argc, char** argv) {
 
             scalar.f64_const(g_f64, count, op, 0.0, sm);
             avx2.f64_const(g_f64, count, op, 0.0, am);
-            if (!MaskEqualRaw(sm, am, count)) {
+            if (!MaskEqualRaw(sm, am)) {
                 std::printf("VERIFY FAILED: f64 %s count=%u\n", OpName(op), count);
                 return 1;
             }
 #if BENCH_HAS_X86
             if (have_avx2) {
                 OldF64Const(g_f64, count, op, 0.0, om);
-                if (!MaskEqualRaw(om, am, count)) {
+                if (!MaskEqualRaw(om, am)) {
                     std::printf("VERIFY FAILED: old f64 %s count=%u\n", OpName(op), count);
                     return 1;
                 }
@@ -294,52 +279,102 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    std::printf("%6s %-6s %14s %14s %14s %10s\n", "count", "type", "scalar(ns)", "avx2(ns)", "old(ns)", "speedup");
-    std::printf("%s\n", std::string(72, '-').c_str());
+    std::printf("%6s %-6s %24s %24s %24s %10s %10s\n", "count", "type", "scalar(ns,median)", "old(ns,median)",
+                "new(ns,median)", "scalar->avx2", "old->new");
+    std::printf("%s\n", std::string(112, '-').c_str());
 
     for (uint32_t count : counts) {
-        g_count = count;
-
         struct Row {
             const char* type;
-            void (*scalar_fn)();
-            void (*avx2_fn)();
-            void (*old_fn)();
+            std::function<void()> scalar_fn;
+            std::function<void()> avx2_fn;
+            std::function<void()> old_fn; // 可能为空
         };
 
 #if BENCH_HAS_X86
-        void (*old_i32)() = have_avx2 ? &TimeOldI32 : nullptr;
-        void (*old_f64)() = have_avx2 ? &TimeOldF64 : nullptr;
+        const bool have_old = have_avx2;
 #else
-        void (*old_i32)() = nullptr;
-        void (*old_f64)() = nullptr;
+        const bool have_old = false;
 #endif
+
         const Row rows[] = {
-            {"i32", &TimeScalarI32, &TimeAvx2I32, old_i32},
-            {"i64", &TimeScalarI64, &TimeAvx2I64, nullptr},
-            {"f32", &TimeScalarF32, &TimeAvx2F32, nullptr},
-            {"f64", &TimeScalarF64, &TimeAvx2F64, old_f64},
+            {"i32",
+             [&] { scalar.i32_const(g_i32, count, CmpOp::GT, 1234, g_mask); },
+             [&] { avx2.i32_const(g_i32, count, CmpOp::GT, 1234, g_mask); },
+#if BENCH_HAS_X86
+             have_old ? std::function<void()>([&] { OldI32Const(g_i32, count, CmpOp::GT, 1234, g_mask); })
+                      : std::function<void()>()
+#else
+             std::function<void()>()
+#endif
+            },
+            {"i64",
+             [&] { scalar.i64_const(g_i64, count, CmpOp::GT, 9007199254740992LL, g_mask); },
+             [&] { avx2.i64_const(g_i64, count, CmpOp::GT, 9007199254740992LL, g_mask); },
+             std::function<void()>()},
+            {"f32",
+             [&] { scalar.f32_const(g_f32, count, CmpOp::GT, 0.0f, g_mask); },
+             [&] { avx2.f32_const(g_f32, count, CmpOp::GT, 0.0f, g_mask); },
+             std::function<void()>()},
+            {"f64",
+             [&] { scalar.f64_const(g_f64, count, CmpOp::GT, 0.0, g_mask); },
+             [&] { avx2.f64_const(g_f64, count, CmpOp::GT, 0.0, g_mask); },
+#if BENCH_HAS_X86
+             have_old ? std::function<void()>([&] { OldF64Const(g_f64, count, CmpOp::GT, 0.0, g_mask); })
+                      : std::function<void()>()
+#else
+             std::function<void()>()
+#endif
+            },
         };
 
         for (const Row& row : rows) {
-            const double scalar_ns = TimeNs(row.scalar_fn, args.iters);
-            const double avx2_ns = TimeNs(row.avx2_fn, args.iters);
-            const double old_ns = row.old_fn != nullptr ? TimeNs(row.old_fn, args.iters) : 0.0;
-
-            double speedup = 0.0;
-            if (old_ns > 0.0 && avx2_ns > 0.0) {
-                speedup = old_ns / avx2_ns;
+            std::vector<MicroKernel> kernels;
+            // Count() 完全移出 timed region：只在全部 sample 结束后做一次。
+            kernels.push_back({"scalar", [&, fn = row.scalar_fn](uint64_t inner) {
+                                   for (uint64_t i = 0; i < inner; ++i) {
+                                       fn();
+                                   }
+                                   DoNotOptimize(g_mask.data()[0]);
+                               }});
+            kernels.push_back({"avx2", [&, fn = row.avx2_fn](uint64_t inner) {
+                                   for (uint64_t i = 0; i < inner; ++i) {
+                                       fn();
+                                   }
+                                   DoNotOptimize(g_mask.data()[0]);
+                               }});
+            if (row.old_fn) {
+                kernels.push_back({"old", [&, fn = row.old_fn](uint64_t inner) {
+                                       for (uint64_t i = 0; i < inner; ++i) {
+                                           fn();
+                                       }
+                                       DoNotOptimize(g_mask.data()[0]);
+                                   }});
             }
 
-            if (old_ns > 0.0) {
-                std::printf("%6u %-6s %14.0f %14.0f %14.0f %9.2fx\n", count, row.type, scalar_ns, avx2_ns, old_ns,
-                            speedup);
+            const std::vector<BenchmarkStats> stats =
+                RunInterleavedMicroBenchmark(kernels, args.warmup, args.samples, args.inner);
+
+            const BenchmarkStats& scalar_stats = stats[0];
+            const BenchmarkStats& avx2_stats = stats[1];
+            const BenchmarkStats* old_stats = row.old_fn ? &stats[2] : nullptr;
+
+            const double scalar_speedup =
+                avx2_stats.median_ns > 0.0 ? scalar_stats.median_ns / avx2_stats.median_ns : 0.0;
+            const double optimization_speedup =
+                (old_stats != nullptr && avx2_stats.median_ns > 0.0) ? old_stats->median_ns / avx2_stats.median_ns
+                                                                     : 0.0;
+
+            if (old_stats != nullptr) {
+                std::printf("%6u %-6s %24.1f %24.1f %24.1f %9.2fx %9.2fx\n", count, row.type,
+                            scalar_stats.median_ns, old_stats->median_ns, avx2_stats.median_ns, scalar_speedup,
+                            optimization_speedup);
             } else {
-                std::printf("%6u %-6s %14.0f %14.0f %14s %10s\n", count, row.type, scalar_ns, avx2_ns, "-", "-");
+                std::printf("%6u %-6s %24.1f %24s %24.1f %9.2fx %10s\n", count, row.type, scalar_stats.median_ns, "-",
+                            avx2_stats.median_ns, scalar_speedup, "-");
             }
         }
     }
 
-    (void)g_sink;
     return 0;
 }

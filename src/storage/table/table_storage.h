@@ -76,7 +76,7 @@ class TableStorage {
     // 绝不推进到其他 segment。metadata pruning / batch 读取 / row filtering
     // 与串行 Scan() 共用完全相同的逻辑。
     // 返回 false 表示本 segment 已读完（或被 metadata pruning 跳过）。
-    bool ScanSegment(SegmentId segment_id, const ScanOptions& options, SegmentScanCursor& cursor, VectorBatch& output);
+    bool ScanSegment(SegmentReader* reader, const ScanOptions& options, SegmentScanCursor& cursor, VectorBatch& output);
 
     // 并行扫描入口：创建 ParallelScanSession（BatchStream）。
     // 调用方 Start() 后通过 BatchStream::Next() 拉取批次；
@@ -116,6 +116,9 @@ class TableStorage {
         return table_path_;
     }
 
+    // 获取（必要时打开）指定 id 的 SegmentReader；失败返回 nullptr
+    SegmentReader* GetSegmentReader(SegmentId id);
+
   private:
     TableStorage(TableId table_id, std::filesystem::path table_path, const TableSchema& schema,
                  TableStorageMeta metadata, BufferPool* buffer_pool);
@@ -131,9 +134,6 @@ class TableStorage {
     void CreateActiveSegment();
 
     bool SaveMeta() const;
-
-    // 获取（必要时打开）指定 id 的 SegmentReader；失败返回 nullptr
-    SegmentReader* GetSegmentReader(SegmentId id);
 
     // 把游标推进到下一个 segment（进度保存在游标内）。
     // 首次调用从 index 0 开始，耗尽返回 false。

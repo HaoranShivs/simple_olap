@@ -9,7 +9,7 @@ namespace simple_olap {
 Database::Database(std::filesystem::path path, DatabaseConfig config)
     : path_(std::move(path)), config_(std::move(config)),
       block_pool_(config_.arena_block_size, config_.block_pool_max_cached_blocks),
-      buffer_pool_(config_.buffer_pool_max_cached_per_class), catalog_(), storage_manager_(path_, &buffer_pool_),
+      buffer_pool_(config_.buffer_pool_max_cached_per_class, config_.buffer_pool_mode), catalog_(), storage_manager_(path_, &buffer_pool_),
       thread_pool_(config_.thread_count) {
 
     Initialize();

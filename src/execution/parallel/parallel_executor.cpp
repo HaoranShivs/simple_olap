@@ -133,11 +133,12 @@ ExecutionResult ParallelExecutor::ExecuteAggregate(const PhysicalHashAggregate& 
                     BuiltExecutor pipeline = builder.Build(child_plan, build_options);
                     pipeline.root->Init();
 
-                    // worker 本地聚合状态进入本 worker 专属 Arena（PMR）。
-                    // Arena 地址在 Query 生命周期内稳定，future move 安全。
-                    Arena& arena = ctx_->memory->WorkerArena(worker_id);
+                    // worker 本地聚合状态进入本 worker 的 memory resource：
+                    // ARENA 模式为 worker Arena（地址在 Query 生命周期内稳定），
+                    // SYSTEM 模式为 new_delete_resource。future move 安全。
+                    std::pmr::memory_resource* resource = ctx_->memory->WorkerResource(worker_id);
 
-                    HashAggregateState local(&spec.group_exprs, &spec.agg_calls, &arena);
+                    HashAggregateState local(&spec.group_exprs, &spec.agg_calls, resource);
                     local.set_outputs(&spec.outputs);
 
                     VectorBatch batch(ctx_->buffer_pool);
@@ -168,9 +169,9 @@ ExecutionResult ParallelExecutor::ExecuteAggregate(const PhysicalHashAggregate& 
     // 7. 收集 future 并 Merge 进 global_state。
     //    即使某个 worker 抛异常，也要把所有 future 收完再上抛，
     //    否则 worker 线程可能仍引用本函数栈上的 spec。
-    // 全局聚合状态进入 coordinator Arena（PMR）
-    Arena& coordinator_arena = ctx_->memory->CoordinatorArena();
-    HashAggregateState global(&spec.group_exprs, &spec.agg_calls, &coordinator_arena);
+    // 全局聚合状态进入 coordinator memory resource（PMR）。
+    std::pmr::memory_resource* coordinator_resource = ctx_->memory->CoordinatorResource();
+    HashAggregateState global(&spec.group_exprs, &spec.agg_calls, coordinator_resource);
     global.set_outputs(&spec.outputs);
 
     std::exception_ptr error = nullptr;

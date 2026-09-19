@@ -10,15 +10,27 @@
 //   - 串行 ScanCursor 把进度（segment 下标）保存在游标自身，因此同一个
 //     TableStorage 实例可以被反复、并发地扫描；本基准在计时区间外只 Open
 //     一次，串行/并行复用同一实例，排除重复打开的开销与差异。
-//   - 计时包含首次懒加载的 mmap，重复多轮取最优/中位数削弱冷启动影响。
+//   - 计时包含首次懒加载的 mmap，重复多轮取中位数削弱冷启动影响。
+//
+// 指标定义修正（BenchmarkSettingV2 §5 / §6）：
+//   - input_rows/s : 实际扫描的 physical rows / s（主指标）
+//   - output_rows/s: filter 之后 active rows / s
+//   - selectivity  : output / input
+//   旧实现把 filter 场景的 ActiveRowCount() 当作 rows/s，输出行只有输入的一半
+//   左右，会把扫描吞吐高估约 2 倍。
+//   - speedup 使用 serial median / parallel median（不再用 best 挑最好的一次）；
+//     best 只作为参考保留。
+//   - --batch 改名 --load-batch：它控制的是数据写入侧 DataChunk 行数，
+//     不是执行层 kVectorBatchSize=1024。--batch 保留为兼容别名。
 //
 // 用法：
 //   bench_parallel_scan [--rows N] [--repeats R] [--warmup W]
-//                       [--threads 1,2,4,8] [--batch B] [--queue Q]
+//                       [--threads 1,2,4,8] [--load-batch B] [--queue Q]
 //                       [--scenario scan|filter|all] [--data DIR] [--help]
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <iomanip>
@@ -32,6 +44,7 @@
 #include <thread>
 #include <vector>
 
+#include "bench_common.h"
 #include "execution/batch_utils.h"
 #include "execution/vector/vector.h"
 #include "storage/datachunk.h"
@@ -41,6 +54,7 @@
 #include "type.h"
 
 using namespace simple_olap;
+using namespace simple_olap::bench;
 using Clock = std::chrono::steady_clock;
 
 namespace {
@@ -59,11 +73,23 @@ struct Options {
     std::filesystem::path data_dir; // 落盘目录
 };
 
+// 扫描计数：主指标 input_rows（physical scanned rows）。
+struct ScanCounters {
+    uint64_t input_rows = 0;   // 扫描过的物理行数（batch.PhysicalSize()）
+    uint64_t output_rows = 0;  // filter 后 active rows
+    uint64_t batches = 0;
+
+    double selectivity() const {
+        return input_rows == 0 ? 0.0 : static_cast<double>(output_rows) / static_cast<double>(input_rows);
+    }
+};
+
 struct TimingStats {
-    uint64_t rows = 0;
+    ScanCounters counters;
     double best_ms = 0.0;
     double median_ms = 0.0;
     double mean_ms = 0.0;
+    double p95_ms = 0.0;
 };
 
 TableSchema MakeSchema() {
@@ -132,43 +158,47 @@ std::unique_ptr<TableStorage> BuildDataset(const std::filesystem::path& tables_r
 }
 
 // 一次串行全表扫描。ScanCursor 自持进度，同一个 table 可重复调用。
-uint64_t RunSerialOnce(TableStorage* table, const ScanOptions& opts) {
-    uint64_t rows = 0;
+ScanCounters RunSerialOnce(TableStorage* table, const ScanOptions& opts) {
+    ScanCounters counters;
     ScanCursor cursor{};
     VectorBatch batch;
     while (table->Scan(opts, cursor, batch)) {
-        rows += ActiveRowCount(batch);
+        ++counters.batches;
+        counters.input_rows += PhysicalRowCount(batch);
+        counters.output_rows += ActiveRowCount(batch);
         batch.Reset();
     }
-    return rows;
+    return counters;
 }
 
 // 一次并行全表扫描：scan worker 从队列推 batch，这里只做消费（count）。
-uint64_t RunParallelOnce(TableStorage* table, const ScanOptions& opts, size_t threads, size_t queue_capacity) {
+ScanCounters RunParallelOnce(TableStorage* table, const ScanOptions& opts, size_t threads, size_t queue_capacity) {
     std::shared_ptr<BatchStream> stream = table->CreateParallelScan(opts, threads, queue_capacity);
     std::static_pointer_cast<ParallelScanSession>(stream)->Start(); // 幂等启动 scan worker
 
-    uint64_t rows = 0;
+    ScanCounters counters;
     VectorBatch batch;
     while (stream->Next(batch)) {
-        rows += ActiveRowCount(batch);
+        ++counters.batches;
+        counters.input_rows += PhysicalRowCount(batch);
+        counters.output_rows += ActiveRowCount(batch);
         batch.Reset();
     }
-    return rows;
+    return counters;
 }
 
-// 预热 + 多轮计时，返回最优/中位/平均耗时（毫秒）与行数。
+// 预热 + 多轮计时，返回 best / median / mean / p95 耗时（毫秒）。
 template <typename Fn> TimingStats TimeIt(Fn&& fn, int warmup, int repeats) {
-    uint64_t rows = 0;
+    ScanCounters counters;
     for (int i = 0; i < warmup; ++i) {
-        rows = fn();
+        counters = fn();
     }
 
     std::vector<double> samples;
     samples.reserve(static_cast<size_t>(repeats));
     for (int i = 0; i < repeats; ++i) {
         const auto t0 = Clock::now();
-        rows = fn();
+        counters = fn();
         const auto t1 = Clock::now();
         samples.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
     }
@@ -176,29 +206,38 @@ template <typename Fn> TimingStats TimeIt(Fn&& fn, int warmup, int repeats) {
     std::sort(samples.begin(), samples.end());
 
     TimingStats stats;
-    stats.rows = rows;
+    stats.counters = counters;
     stats.best_ms = samples.front();
     stats.median_ms = samples[samples.size() / 2];
     stats.mean_ms = std::accumulate(samples.begin(), samples.end(), 0.0) / static_cast<double>(samples.size());
+    stats.p95_ms = samples[std::min(samples.size() - 1,
+                                    static_cast<size_t>(std::ceil(0.95 * static_cast<double>(samples.size()))) - 1)];
     return stats;
 }
 
 void PrintTableHeader() {
-    std::cout << std::left << std::setw(10) << "mode" << std::right << std::setw(9) << "threads" << std::setw(14)
-              << "best(ms)" << std::setw(14) << "median(ms)" << std::setw(14) << "mean(ms)" << std::setw(16) << "rows/s"
-              << std::setw(11) << "speedup" << std::setw(14) << "rows" << "\n";
-    std::cout << std::string(102, '-') << "\n";
+    std::cout << std::left << std::setw(9) << "mode" << std::right << std::setw(4) << "thr" << std::setw(10)
+              << "best(ms)" << std::setw(10) << "median(ms)" << std::setw(10) << "mean(ms)" << std::setw(10)
+              << "p95(ms)" << std::setw(15) << "input_rows/s" << std::setw(15) << "output_rows/s" << std::setw(10)
+              << "select" << std::setw(9) << "speedup" << std::setw(12) << "input_rows" << "\n";
+    std::cout << std::string(124, '-') << "\n";
 }
 
-void PrintTableRow(const std::string& mode, size_t threads, const TimingStats& stats, double serial_best_ms) {
-    const double seconds = stats.best_ms / 1000.0;
-    const double rows_per_s = seconds > 0.0 ? static_cast<double>(stats.rows) / seconds : 0.0;
-    const double speedup = (serial_best_ms > 0.0 && stats.best_ms > 0.0) ? serial_best_ms / stats.best_ms : 1.0;
+// speedup 与吞吐都使用 median；best 只作参考列。
+void PrintTableRow(const std::string& mode, size_t threads, const TimingStats& stats, double serial_median_ms) {
+    const ScanCounters& c = stats.counters;
+    const double seconds = stats.median_ms / 1000.0;
+    const double input_rows_per_s = seconds > 0.0 ? static_cast<double>(c.input_rows) / seconds : 0.0;
+    const double output_rows_per_s = seconds > 0.0 ? static_cast<double>(c.output_rows) / seconds : 0.0;
+    const double speedup =
+        (serial_median_ms > 0.0 && stats.median_ms > 0.0) ? serial_median_ms / stats.median_ms : 1.0;
 
-    std::cout << std::left << std::setw(10) << mode << std::right << std::setw(9) << threads << std::fixed
-              << std::setprecision(2) << std::setw(14) << stats.best_ms << std::setw(14) << stats.median_ms
-              << std::setw(14) << stats.mean_ms << std::setw(16) << static_cast<uint64_t>(rows_per_s) << std::setw(10)
-              << std::setprecision(2) << speedup << "x" << std::setw(14) << stats.rows << "\n";
+    std::cout << std::left << std::setw(9) << mode << std::right << std::setw(4) << threads << std::fixed
+              << std::setprecision(2) << std::setw(10) << stats.best_ms << std::setw(10) << stats.median_ms
+              << std::setw(10) << stats.mean_ms << std::setw(10) << stats.p95_ms << std::setw(15)
+              << static_cast<uint64_t>(input_rows_per_s) << std::setw(15) << static_cast<uint64_t>(output_rows_per_s)
+              << std::setw(10) << std::setprecision(3) << c.selectivity() << std::setprecision(2) << std::setw(8)
+              << speedup << "x" << std::setw(12) << c.input_rows << "\n";
 }
 
 void RunScenario(const std::string& title, bool with_filter, const Options& opt, const TableSchema& schema,
@@ -216,18 +255,20 @@ void RunScenario(const std::string& title, bool with_filter, const Options& opt,
 
     const auto serial_fn = [&] { return RunSerialOnce(table.get(), scan_options); };
     const TimingStats serial = TimeIt(serial_fn, opt.warmup, opt.repeats);
-    PrintTableRow("serial", 1, serial, serial.best_ms);
+    PrintTableRow("serial", 1, serial, serial.median_ms);
 
     for (size_t threads : opt.threads) {
         const auto parallel_fn = [&] {
             return RunParallelOnce(table.get(), scan_options, threads, opt.queue_capacity);
         };
         const TimingStats stats = TimeIt(parallel_fn, opt.warmup, opt.repeats);
-        PrintTableRow("parallel", threads, stats, serial.best_ms);
+        PrintTableRow("parallel", threads, stats, serial.median_ms);
 
-        if (stats.rows != serial.rows) {
-            std::cerr << "  [warn] threads=" << threads << " rows=" << stats.rows << " != serial rows=" << serial.rows
-                      << "\n";
+        if (stats.counters.input_rows != serial.counters.input_rows ||
+            stats.counters.output_rows != serial.counters.output_rows) {
+            std::cerr << "  [warn] threads=" << threads << " input/output rows (" << stats.counters.input_rows << "/"
+                      << stats.counters.output_rows << ") != serial (" << serial.counters.input_rows << "/"
+                      << serial.counters.output_rows << ")\n";
         }
     }
 }
@@ -237,7 +278,8 @@ void PrintUsage(const char* argv0) {
               << "  --rows N           数据集行数（默认 4000000）\n"
               << "  --repeats R        每个配置计时轮数（默认 5）\n"
               << "  --warmup W         预热轮数（默认 2）\n"
-              << "  --batch B          写入侧 DataChunk 行数（默认 8192）\n"
+              << "  --load-batch B     写入侧 DataChunk 行数（默认 8192）\n"
+              << "  --batch B          --load-batch 的兼容别名\n"
               << "  --queue Q          并行批队列容量（默认 16）\n"
               << "  --threads 1,2,4,8  待测并行线程数（默认 1,2,4,8 截断到硬件并发度）\n"
               << "  --scenario S       scan | filter | all（默认 all）\n"
@@ -299,7 +341,7 @@ Options ParseArgs(int argc, char** argv) {
             opt.repeats = std::stoi(value());
         } else if (arg == "--warmup") {
             opt.warmup = std::stoi(value());
-        } else if (arg == "--batch") {
+        } else if (arg == "--load-batch" || arg == "--batch") {
             opt.batch_rows = static_cast<uint32_t>(std::stoul(value()));
         } else if (arg == "--queue") {
             opt.queue_capacity = static_cast<size_t>(std::stoul(value()));
@@ -334,9 +376,10 @@ int main(int argc, char** argv) {
         const TableSchema schema = MakeSchema();
         const std::filesystem::path tables_root = opt.data_dir / "tables";
 
+        PrintEnvironment(QueryEnvironment());
         std::cout << "simple_olap parallel-scan benchmark\n"
                   << "  rows         : " << opt.rows << "\n"
-                  << "  batch        : " << opt.batch_rows << "\n"
+                  << "  load_batch   : " << opt.batch_rows << " (write-side DataChunk rows)\n"
                   << "  repeats      : " << opt.repeats << " (warmup " << opt.warmup << ")\n"
                   << "  queue        : " << opt.queue_capacity << "\n"
                   << "  hardware     : " << std::thread::hardware_concurrency() << " threads\n"

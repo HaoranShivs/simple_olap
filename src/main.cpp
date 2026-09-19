@@ -17,6 +17,7 @@
 #include "main/connection.h"
 #include "main/database.h"
 #include "main/query_result.h"
+#include "main/result_digest.h"
 #include "storage/datachunk.h"
 #include "storage/datastructs.h"
 #include "storage/table/table_storage.h"
@@ -33,6 +34,10 @@ namespace {
 // 基准测试用：--silent 时跳过结果集的逐行格式化输出，只保留行数统计，
 // 避免结果打印（I/O）主导执行计时。
 bool g_silent = false;
+
+// 基准测试用：--digest 时输出与行序无关的结果摘要（row_count + hash1 + hash2），
+// 用于 scalar / AVX2、single / multi 等 A/B 的正确性校验。
+bool g_digest = false;
 
 // ==========================================
 // ReadSql：从 stdin 读取一条完整 SQL 语句
@@ -147,6 +152,14 @@ void PrintResult(const QueryResult& result) {
         uint64_t total_rows = 0;
         for (const auto& batch : result.chunks) {
             total_rows += batch.size;
+        }
+
+        // 基准测试：输出结果摘要，供 A/B 校验
+        if (g_digest) {
+            const ResultDigest digest = ComputeResultDigest(result);
+            std::cout << "digest rows=" << digest.row_count << " hash1=" << digest.hash1
+                      << " hash2=" << digest.hash2 << "\n";
+            break;
         }
 
         // 基准测试：只输出行数，跳过表头与逐行格式化
@@ -336,9 +349,11 @@ void PrintHelp() {
               << "  --db DIR                   override database root directory\n"
               << "  --gen-table NAME           generate (id INT64, value DOUBLE) table\n"
               << "  --rows N                   rows to generate (default 4000000)\n"
-              << "  --batch B                  DataChunk rows per write (default 8192)\n"
+              << "  --load-batch B             DataChunk rows per write (default 8192)\n"
+              << "  --batch B                  alias of --load-batch\n"
               << "  --drop-table NAME          drop a table and exit\n"
-              << "  --silent                   skip row output (benchmark)\n";
+              << "  --silent                   skip row output (benchmark)\n"
+              << "  --digest                   print order-independent result digest\n";
 }
 
 } // namespace
@@ -391,8 +406,10 @@ int main(int argc, char** argv) {
             drop_table = argv[++i];
         } else if (arg == "--rows" && i + 1 < argc) {
             gen_rows = std::stoull(argv[++i]);
-        } else if (arg == "--batch" && i + 1 < argc) {
+        } else if ((arg == "--load-batch" || arg == "--batch") && i + 1 < argc) {
             gen_batch = static_cast<uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--digest") {
+            g_digest = true;
         } else if (arg == "--silent" || arg == "--quiet" || arg == "-q") {
             g_silent = true;
         } else if (arg == "--help" || arg == "-h") {

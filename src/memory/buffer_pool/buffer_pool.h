@@ -9,6 +9,20 @@
 
 namespace simple_olap {
 
+// BufferPool 分配模式（用于 benchmark 消融，默认 POOLED，不改变生产行为）：
+//
+//   POOLED ：走 size-class freelist；Release 时优先回收进 freelist，
+//            未命中才 ::operator new/delete。
+//   DIRECT ：完全绕开 freelist，每次 Acquire 直接 ::operator new、
+//            Release 直接 ::operator delete（baseline）。
+//
+// 不能用 max_cached_per_class=0 代替 DIRECT：那仍然会进 freelist 的 mutex，
+// baseline 不干净。
+enum class BufferPoolMode : uint8_t {
+    POOLED = 0,
+    DIRECT = 1,
+};
+
 class BufferPool;
 
 // BufferHandle：BufferPool buffer 的 RAII 拥有者。
@@ -64,8 +78,10 @@ class BufferHandle {
 // BufferPool 统计信息，只用于 benchmark / debug / test。
 struct BufferPoolStats {
     uint64_t system_allocations = 0;
+    uint64_t system_deallocations = 0;
     uint64_t pool_hits = 0;
     uint64_t pool_returns = 0;
+    size_t cached_buffers = 0; // 当前缓存在各个 freelist 中的 buffer 数
 };
 
 // BufferPool：提供可 acquire/release 的定长 buffer。
@@ -80,7 +96,7 @@ class BufferPool {
   public:
     static constexpr size_t ALIGNMENT = 64;
 
-    explicit BufferPool(size_t max_cached_per_class = 64);
+    explicit BufferPool(size_t max_cached_per_class = 64, BufferPoolMode mode = BufferPoolMode::POOLED);
 
     ~BufferPool();
 
@@ -92,6 +108,10 @@ class BufferPool {
 
     BufferPoolStats stats() const noexcept;
 
+    BufferPoolMode mode() const noexcept {
+        return mode_;
+    }
+
   private:
     friend class BufferHandle;
 
@@ -99,7 +119,7 @@ class BufferPool {
 
   private:
     struct FreeList {
-        std::mutex mutex;
+        mutable std::mutex mutex;
         std::vector<uint8_t*> buffers;
     };
 
@@ -110,8 +130,10 @@ class BufferPool {
     std::array<FreeList, kClassCount> free_lists_{};
 
     size_t max_cached_per_class_;
+    BufferPoolMode mode_ = BufferPoolMode::POOLED;
 
     std::atomic<uint64_t> system_allocations_{0};
+    std::atomic<uint64_t> system_deallocations_{0};
     std::atomic<uint64_t> pool_hits_{0};
     std::atomic<uint64_t> pool_returns_{0};
 };

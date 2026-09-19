@@ -12,10 +12,11 @@ namespace simple_olap {
 
 // BlockPool 统计信息，只用于 benchmark / debug / test，不参与执行逻辑。
 struct BlockPoolStats {
-    uint64_t system_allocations = 0; // 直接向系统申请的次数
-    uint64_t pool_hits = 0;          // 从 freelist 命中的次数
-    uint64_t pool_returns = 0;       // 归还进 freelist 的次数
-    size_t cached_blocks = 0;        // 当前缓存的 block 数
+    uint64_t system_allocations = 0;   // 直接向系统申请的次数
+    uint64_t system_deallocations = 0; // 直接向系统释放的次数
+    uint64_t pool_hits = 0;            // 从 freelist 命中的次数
+    uint64_t pool_returns = 0;         // 归还进 freelist 的次数
+    size_t cached_blocks = 0;          // 当前缓存的 block 数
 };
 
 // BlockPool：
@@ -56,12 +57,16 @@ class BlockPool {
         return system_allocations_.load(std::memory_order_relaxed);
     }
 
+    uint64_t system_deallocations() const noexcept {
+        return system_deallocations_.load(std::memory_order_relaxed);
+    }
+
   private:
     MemoryBlock AllocateNormalBlock();
 
     MemoryBlock AllocateLargeBlock(size_t capacity);
 
-    static void FreeBlock(MemoryBlock& block) noexcept;
+    void FreeBlock(MemoryBlock& block) noexcept;
 
   private:
     size_t block_size_;
@@ -71,6 +76,7 @@ class BlockPool {
     std::vector<MemoryBlock> free_blocks_;
 
     std::atomic<uint64_t> system_allocations_{0};
+    std::atomic<uint64_t> system_deallocations_{0};
     std::atomic<uint64_t> pool_hits_{0};
     std::atomic<uint64_t> pool_returns_{0};
 };

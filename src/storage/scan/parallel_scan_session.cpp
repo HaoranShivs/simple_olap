@@ -68,6 +68,8 @@ void ParallelScanSession::ScanWorkerLoop() {
 
             const SegmentId id = segment_ids_[index];
 
+            SegmentReader* reader = table_->GetSegmentReader(id);
+
             SegmentScanCursor cursor;
             cursor.prepared_predicates = prepared_.get();
             // scan worker 产出的 batch 绑定 BufferPool：
@@ -75,7 +77,7 @@ void ParallelScanSession::ScanWorkerLoop() {
             VectorBatch batch(buffer_pool_);
 
             // 与串行路径共用同一份单 segment 扫描逻辑
-            while (table_->ScanSegment(id, options_, cursor, batch)) {
+            while (table_->ScanSegment(reader, options_, cursor, batch)) {
                 if (cancelled_.load(std::memory_order_relaxed)) {
                     return;
                 }

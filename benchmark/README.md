@@ -1,109 +1,163 @@
 # benchmark
 
-性能基准测试。
+性能基准测试。所有端到端计时都在 C++ benchmark 可执行文件内完成；
+shell 脚本只负责 build / 生成数据集 / 汇总结果，不做纳秒级计时。
 
-## 职责
+指标口径与整改方案见 `docs/BenchmarkSettingV2.md`。
 
-- 生成测试数据集（不同规模、不同数据分布：均匀/偏斜/低基数）
-- 运行典型 OLAP 查询负载（扫描、过滤、聚合、GROUP BY）
-- 度量指标：
-  - 查询吞吐（rows/s、queries/s）
-  - 端到端延迟（p50/p95/p99）
-  - 压缩率（各 encoding 的压缩比）
-  - 并行加速比（线程数 vs 吞吐）
-- 输出可对比的基准报告
+## 指标定义
 
-## 设计要点
-
-- 基准用例与 test 分离：test 验证正确性，benchmark 验证性能
-- 数据集生成可复用（固定随机种子，保证可复现）
-- 对比基线：单线程 vs 多线程、不同编码、不同 batch size
-
-## bench_parallel_scan：并行扫描 vs 串行扫描
-
-对比 `TableStorage::Scan`（单线程）与 `ParallelScanSession`（多线程 scan worker
-+ 有界队列）的运行时间，输出 best / median / mean、rows/s 与相对串行的加速比。
-
-```bash
-./benchmark/run_bench.sh                       # 默认 400 万行，全场景
-./benchmark/run_bench.sh --rows 8000000 --threads 1,2,4,8
-./benchmark/run_bench.sh --scenario filter --repeats 7
-./build/bin/bench_parallel_scan --help         # 全部选项
-```
-
-两个场景：
-
-- `scan`：无谓词，串行路径基本是 mmap 零拷贝建视图，单线程极快。
-  并行路径要付出线程调度 + 有界队列 push/pop 的开销，因此更容易变慢。
-- `filter`：下推 `value > 0.5`（value 在 [0,1) 均匀分布，metadata 无法剪枝），
-  每行都进入逐行过滤，是 CPU 密集场景，最能体现多线程加速。
-
-注意事项：
-
-- 串行 `ScanCursor` 把进度（segment 下标）保存在游标自身，同一个 `TableStorage`
-  实例可以被反复、并发地扫描。benchmark 在计时区间外只 `Open` 一次，串行/并行
-  复用同一实例，排除重复打开的开销与差异。
-- 每轮计时仍包含首次懒加载 mmap，用预热轮 + 多轮取 best/median 削弱冷启动与
-  系统噪声影响；共享机器上并行数据抖动较大属正常现象。
-- 结论方向：只有当每行 CPU 工作（过滤/聚合）占主导时并行才有正收益；纯零拷贝
-  扫描会被队列与线程开销吃掉。
-
-## bench_execution_modes：单线程 vs 多线程执行整条 SQL
-
-对「整条 SQL 语句」在 `--mode single` 与 `--mode multi` 下分别重复计时，
-输出 best / median / mean 与加速比。执行模式由 `ExecutionEngine` 的
-`ExecutionMode` 控制（见 `src/execution/execution_engine.h`）。
-
-脚本会在独立数据库目录中生成一份 `(id INT64, value DOUBLE)` 数据集
-（`value ~ U(0,1)`，与 `bench_parallel_scan` 同一种子），默认只做只读查询，
-不污染项目主库 `database/`。
-
-```bash
-./benchmark/bench_execution_modes.sh                          # 默认 400 万行，5 轮
-./benchmark/bench_execution_modes.sh --rows 1000000 --batch 4096 --queue 32
-./benchmark/bench_execution_modes.sh --threads 8 --repeats 7 --warmup 3
-./benchmark/bench_execution_modes.sh \
-    --sql "SELECT COUNT(*) FROM bench_data WHERE value > 0.5;"
-./benchmark/bench_execution_modes.sh --no-gen --db "$(pwd)/database" \
-    --sql "SELECT id, price FROM goods WHERE price > 500;"
-./benchmark/bench_execution_modes.sh --no-build
-```
-
-可调参数（默认值与 `benchmark/bench_parallel_scan.cpp` 对齐）：
-
-| 参数 | 默认 | 含义 |
+| 指标 | 口径 | 谁在测 |
 | --- | --- | --- |
-| `--rows N` | 4000000 | 数据集行数 |
-| `--batch B` | 8192 | 写入侧 DataChunk 行数 |
-| `--queue Q` | 16 | 并行批队列容量（背压） |
-| `--threads N` | nproc | 多线程模式 compute/scan worker 数 |
-| `--repeats R` | 5 | 每个模式计时轮数 |
-| `--warmup W` | 2 | 每轮计时前预热次数 |
-| `--table NAME` | bench_data | 生成的数据集表名 |
-| `--db DIR` | `benchmark/bench_data/modes_db` | 数据库根目录 |
-| `--sql "..."` | 内置 3 条 | 追加待测 SQL（可多次） |
-| `--no-gen` | - | 跳过数据集生成，复用 `--db` 中已有表 |
+| `engine` QPS / 延迟 | `Connection::Execute(sql, consumer)`：SQL 前端 + planning + 执行 + O(1) blackhole consumer，不物化结果 | `bench_query_workload --result-mode engine` |
+| `prepared` 延迟 | `Connection::Prepare(sql)` 只做一次，计时只包住 `Connection::Execute(prepared, consumer)`，即 execution-only | `bench_query_workload --result-mode prepared` |
+| `materialized` QPS / 延迟 | `Connection::Query(sql)`：engine + `QueryResult` 全量深拷贝 | `bench_query_workload --result-mode materialized` |
+| P50 / P95 / P99 | 每次 query 记录一个 `steady_clock` 样本，per-client 本地 vector，结束后 merge；nearest-rank `ceil(p*N)-1` | `bench_query_workload` |
+| QPS | measurement window 内成功完成的 query 数 / 真实 elapsed 秒数（**不是** `1000 / latency`） | `bench_query_workload` |
+| 扫描吞吐 | `input_rows/s` = 扫描物理行 / s（主指标），`output_rows/s` = filter 后 active rows / s，并给出 selectivity | `bench_parallel_scan` |
+| 并行加速比 | `serial median / parallel median`（best 只作参考列） | `bench_parallel_scan` |
+| 分配开销 | 测量窗口内 `BlockPool` / `BufferPool` 计数增量：`system_allocations/query`、`pool_hit_rate` | `bench_query_workload` |
 
-脚本依赖的 `simple_olap` CLI 开关：`--db / --gen-table / --rows / --batch /
---drop-table / --queue / --scan-threads / --compute-threads`。
-其中 `--threads N` 会同时设置 compute 与 scan 的 worker 数。
+正确性不再只比较 row count：所有 A/B 校验使用与行序无关的 `ResultDigest`
+（`row_count + hash1 + hash2`，`src/main/result_digest.h`）。这样 multi 模式
+输出顺序不同也不会产生 false mismatch。
+
+## 端到端：bench_query_workload
+
+固定数据集 `perf_data`（无索引，走 SeqScan）：
+
+```
+id BIGINT, group_low BIGINT, group_high BIGINT, value DOUBLE, value2 DOUBLE
+```
+
+固定 workload：Q1 storage compare / Q2 execution filter / Q3 sparse projection /
+Q4 低基数 GROUP BY / Q5 高基数 GROUP BY / mixed 加权混合。
+
+```bash
+# 生成数据集
+./build/bin/bench_query_workload --db benchmark/bench_data/perf_db --prepare --rows 4000000
+
+# engine + materialized 两个口径（默认），4 clients
+./build/bin/bench_query_workload --db benchmark/bench_data/perf_db \
+    --workload mixed --clients 4 --result-mode both --warmup 5 --duration 30 --min-samples 5000
+
+# execution-only（预编译）延迟
+./build/bin/bench_query_workload --db benchmark/bench_data/perf_db \
+    --workload q5 --result-mode prepared
+
+# 内存消融 baseline
+./build/bin/bench_query_workload --db benchmark/bench_data/perf_db --workload q5 \
+    --memory system --buffer-mode direct --block-cache 0 --buffer-cache 0
+```
 
 要点：
 
-- 借助 `--silent` 跳过逐行结果格式化，避免 I/O 主导计时；同时仍会校验两种模式的
-  行数是否一致（`[OK]` / `[MISMATCH]`）。
-- 计时包含进程启动与打开 database 的固定开销，脚本会单独测量「仅 exit」基线供扣除。
-- 数据集在计时之外生成并 `Flush` 落盘，扫描侧看到的是已封口的 segment。
-- 默认数据库目录位于 `benchmark/bench_data/`（已在 `.gitignore` 中忽略）。
+- Database 只构造一次；每个 client 一个独立 `Connection`；start barrier 后统一
+  测量；每 client 本地记录 latency，结束后 merge，不在热路径抢全局锁。
+- 测量前自动对每条 workload 做 engine / prepared / materialized digest 一致性
+  校验，任何不一致直接 abort。
+- `query_count < 1000` 时输出 `[insufficient samples for p99]`：P99 不作为正式
+  指标。正式结果建议 `min_samples >= 5000`。
+- 启动时打印 commit / build type / compiler / CPU / 物理核数 / AVX2 /
+  `vector_batch_rows`（固定 1024）等环境信息。
+- `--load-batch` 控制的是**数据写入侧** DataChunk 行数；执行层
+  `kVectorBatchSize = 1024` 是编译期常量，二者不是一回事。
 
-参考结果（4 线程，20 万行合成数据集，本机实测）：
+## 一键矩阵：run_perf_suite.sh
 
-| SQL | single | multi | speedup |
-| --- | --- | --- | --- |
-| `SELECT * FROM bench_data;` | ~3.9 ms | ~8.1 ms | 0.48x |
-| `SELECT id, value FROM bench_data WHERE value > 0.5;` | ~7.8 ms | ~8.6 ms | 0.90x |
-| `SELECT COUNT(*) FROM bench_data WHERE value > 0.5;` | ~9.9 ms | ~4.5 ms | 2.2x |
+```bash
+./benchmark/run_perf_suite.sh                # 正式（耗时较长）
+./benchmark/run_perf_suite.sh --quick        # 快速自检
+./benchmark/run_perf_suite.sh --result-mode engine --skip-memory
+./benchmark/run_perf_suite.sh --cpus 0-3     # 固定 CPU 集合（可选，需 taskset）
+```
 
-结论方向：与 `bench_parallel_scan` 一致 —— 只有每行 CPU 成本占主导的
-场景（过滤 + 聚合）多线程才有正收益；纯扫描/投影由于是零拷贝建视图、且
-并行路径的消费端（结果收集/深拷贝）仍是单线程，多线程会被调度与队列开销拖慢。
+流程：
+
+1. build；
+2. 生成标准数据集 + latency profile 数据集；
+3. correctness smoke（单元测试） + `verify_simd.sh` digest 校验；
+4. QPS matrix：client 并发 × workload（single-thread execution）；
+5. parallel scaling：`--mode multi --threads 1/2/4/8`；
+6. AVX2 A/B：同一二进制，`SIMPLE_OLAP_FORCE_SCALAR=1` vs 默认，
+   **paired 顺序**（每轮交替 scalar→avx2 / avx2→scalar）；
+7. 内存消融 M0→M3 + 微基准原始输出。
+
+内存消融矩阵（`--result-mode both` 时每个配置同时得到 engine / materialized 两行）：
+
+| 配置 | memory | buffer-mode | block-cache | buffer-cache |
+| --- | --- | --- | --- | --- |
+| M0 | system | direct | 0 | 0 |
+| M1 | arena | direct | 0 | 0 |
+| M2 | arena | pooled | 64 | 0 |
+| M3 | arena | pooled | 64 | 64 |
+
+产出：
+
+- `benchmark/results/perf_suite_<ts>.csv`：一行一个 (配置, result_mode)；
+- `benchmark/results/summary_<ts>.txt`：按配置取 median QPS/P50/P99；
+- `benchmark/results/micro_<ts>.txt`：五个微基准原始输出。
+
+任何一次 measurement 失败都会中止整个 suite（不再 `|| true` 吞错误）。
+
+## 正确性校验：verify_simd.sh
+
+```bash
+./benchmark/verify_simd.sh
+./benchmark/verify_simd.sh --rows 1000000 --no-build --no-gen
+./benchmark/verify_simd.sh --sql "SELECT COUNT(*) FROM bench_data WHERE value > 0.5;"
+```
+
+在同一二进制上比较 `(scalar, single)` / `(avx2, single)` / `(avx2, multi)`
+三种组合的 `--digest` 摘要，覆盖 SIMD 后端与单/多线程路径。
+
+## 并行扫描：bench_parallel_scan
+
+```bash
+./benchmark/run_bench.sh                                  # 包装脚本
+./build/bin/bench_parallel_scan --rows 4000000 --threads 1,2,4
+./build/bin/bench_parallel_scan --scenario filter --load-batch 4096
+```
+
+输出主指标 `input_rows/s`（物理扫描行）与 `output_rows/s`（filter 后 active
+rows）以及 selectivity；`scan-only` 场景两者相同。speedup 使用 median。
+`--batch` 保留为 `--load-batch` 的兼容别名。
+
+注意：串行 `ScanCursor` 自持进度，benchmark 在计时区间外只 `Open` 一次，
+串行/并行复用同一实例；每轮计时仍包含首次懒加载 mmap，用预热轮 + 多轮
+median 削弱冷启动影响。纯零拷贝扫描会被并行队列/线程开销吃掉，
+只有每行 CPU 工作占主导（filter / aggregate）时并行才有正收益。
+
+## 微基准
+
+```bash
+./build/bin/bench_compare_kernel       # scalar / 64-row bitmap block / 旧逐段 |= 写法
+./build/bin/bench_arith_kernel         # legacy variant vs scalar vs AVX2 算术内核
+./build/bin/bench_sparse_projection    # mask gather vs 旧逐行物化（kernel-only / pipeline 两层）
+./build/bin/bench_selection_pipeline   # mask-native vs selection-vector 往返
+./build/bin/bench_global_aggregate     # hash 表路径 vs Global Fast Path（consume / full 两层）
+./build/bin/bench_perf_counters        # perf_event_open: cycles/IPC/L1d/LLC/MPKI/branch-miss
+```
+
+统一 harness（`bench_common.h`）：
+
+- 默认 3 轮 warmup + 15 个 sample，每个 sample 至少几毫秒（由 `--inner` 控制）；
+- 多 kernel 对比使用固定种子随机顺序交错，消除固定 A/B 顺序偏差；
+- 主指标是 median + MAD，不把 best 当主指标；
+- 每个被测 kernel 内部不掺入额外 popcount / checksum 扫描；确需模拟下游
+  消费时单独输出 pipeline 指标。
+
+微基准的具体修正：
+
+- `bench_arith_kernel`：浮点数据改用 `mt19937_64 + uniform_real_distribution`，
+  修复旧实现中 double LCG 溢出成 `inf` 的问题；
+- `bench_compare_kernel`：`SelectionMask::Count()` 完全移出 timed region；
+- `bench_sparse_projection`：拆成 kernel-only（gather+arith）与 pipeline
+  （+下游 checksum），局部 SIMD 收益看前者；
+- `bench_global_aggregate`：拆成 `global-consume`（只计 Consume）与
+  `global-full`（state 构造 + Consume + NextResult）；sink 同时消费 count 与
+  sum，SUM-only 场景不会被优化掉。
+
+## 尚未实现
+
+- 压缩率（encoding ratio）benchmark 尚未实现。

@@ -322,11 +322,12 @@ BuiltExecutor ExecutorBuilder::BuildHashAggregate(const PhysicalHashAggregate& p
     BuiltExecutor child = BuildNode(plan.GetChild(), options);
     BuiltAggregateSpec spec = BuildAggregateSpec(plan, child.output_schema);
 
-    // 聚合状态进入 coordinator Arena（PMR）；输出 batch 绑定 BufferPool。
-    return BuiltExecutor{std::make_unique<HashAggregateOperator>(std::move(child.root), std::move(spec.group_exprs),
-                                                                 std::move(spec.agg_calls), std::move(spec.outputs),
-                                                                 &ctx_->memory->CoordinatorArena(), ctx_->buffer_pool),
-                         std::move(spec.output_schema)};
+    // 聚合状态进入 coordinator resource（PMR：Arena 或 new_delete）；输出 batch 绑定 BufferPool。
+    std::pmr::memory_resource* coordinator_resource = ctx_->memory->CoordinatorResource();
+    auto root = std::make_unique<HashAggregateOperator>(std::move(child.root), std::move(spec.group_exprs),
+                                                        std::move(spec.agg_calls), std::move(spec.outputs),
+                                                        coordinator_resource, ctx_->buffer_pool);
+    return BuiltExecutor{std::move(root), std::move(spec.output_schema)};
 }
 
 } // namespace simple_olap

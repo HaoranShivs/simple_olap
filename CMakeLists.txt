@@ -76,32 +76,68 @@ endif()
 # 并行扫描 vs 串行扫描运行时间对比。
 option(SIMPLE_OLAP_BUILD_BENCHMARK "Build benchmark executables" ON)
 
+# benchmark 环境信息：commit SHA + build type（bench_common.h 使用）
+execute_process(
+    COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE SIMPLE_OLAP_GIT_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+if(NOT SIMPLE_OLAP_GIT_COMMIT)
+    set(SIMPLE_OLAP_GIT_COMMIT "unknown")
+endif()
+
+# 给每个 benchmark 注入环境宏；static 目标一次即可
+function(simple_olap_configure_bench target)
+    target_compile_definitions(${target} PRIVATE
+        SIMPLE_OLAP_GIT_COMMIT="${SIMPLE_OLAP_GIT_COMMIT}"
+        SIMPLE_OLAP_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
+endfunction()
+
 if(SIMPLE_OLAP_BUILD_BENCHMARK)
     add_executable(bench_parallel_scan ${CMAKE_SOURCE_DIR}/benchmark/bench_parallel_scan.cpp)
     target_link_libraries(bench_parallel_scan PRIVATE simple_olap_core)
     # 注入项目根目录，使默认数据目录与 CWD 无关
     target_compile_definitions(bench_parallel_scan PRIVATE
         SIMPLE_OLAP_BENCH_ROOT_DIR="${CMAKE_SOURCE_DIR}")
+    simple_olap_configure_bench(bench_parallel_scan)
 
     # Projection 算术内核微基准（scalar vs AVX2 vs 旧逐行 variant 路径）
     add_executable(bench_arith_kernel ${CMAKE_SOURCE_DIR}/benchmark/bench_arith_kernel.cpp)
     target_link_libraries(bench_arith_kernel PRIVATE simple_olap_core)
+    simple_olap_configure_bench(bench_arith_kernel)
 
     # Sparse projection 微基准（mask -> gather -> SIMD vs 旧逐行物化）
     add_executable(bench_sparse_projection ${CMAKE_SOURCE_DIR}/benchmark/bench_sparse_projection.cpp)
     target_link_libraries(bench_sparse_projection PRIVATE simple_olap_core)
+    simple_olap_configure_bench(bench_sparse_projection)
 
     # Selection pipeline 微基准（mask-native vs selection-vector 往返）
     add_executable(bench_selection_pipeline ${CMAKE_SOURCE_DIR}/benchmark/bench_selection_pipeline.cpp)
     target_link_libraries(bench_selection_pipeline PRIVATE simple_olap_core)
+    simple_olap_configure_bench(bench_selection_pipeline)
 
     # AVX2 compare 微基准（scalar / 64-row bitmap block / 旧逐段 |= 写法）
     add_executable(bench_compare_kernel ${CMAKE_SOURCE_DIR}/benchmark/bench_compare_kernel.cpp)
     target_link_libraries(bench_compare_kernel PRIVATE simple_olap_core)
+    simple_olap_configure_bench(bench_compare_kernel)
 
     # Global aggregate 微基准（hash 表路径 vs Global Fast Path）
     add_executable(bench_global_aggregate ${CMAKE_SOURCE_DIR}/benchmark/bench_global_aggregate.cpp)
     target_link_libraries(bench_global_aggregate PRIVATE simple_olap_core)
+    simple_olap_configure_bench(bench_global_aggregate)
+
+    # Hardware counter 微基准（perf_event_open：cycles / IPC / LLC miss / branch miss）
+    add_executable(bench_perf_counters ${CMAKE_SOURCE_DIR}/benchmark/bench_perf_counters.cpp)
+    target_link_libraries(bench_perf_counters PRIVATE simple_olap_core)
+    simple_olap_configure_bench(bench_perf_counters)
+
+    # 端到端查询 benchmark（engine / materialized QPS + P50/P95/P99 + 内存消融）
+    add_executable(bench_query_workload ${CMAKE_SOURCE_DIR}/benchmark/bench_query_workload.cpp)
+    target_link_libraries(bench_query_workload PRIVATE simple_olap_core)
+    target_compile_definitions(bench_query_workload PRIVATE
+        SIMPLE_OLAP_BENCH_ROOT_DIR="${CMAKE_SOURCE_DIR}")
+    simple_olap_configure_bench(bench_query_workload)
 endif()
 
 # ---------- 可选：单元测试 ----------

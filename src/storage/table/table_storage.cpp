@@ -310,14 +310,8 @@ SegmentReader* TableStorage::GetSegmentReader(SegmentId id) {
 //   避免重复过滤是 Optimizer 的职责。
 //
 //    row_filter_mask 为 0 的 predicate 在本 segment 内不再逐行判断。
-bool TableStorage::ScanSegment(SegmentId segment_id, const ScanOptions& options, SegmentScanCursor& cursor,
+bool TableStorage::ScanSegment(SegmentReader* reader, const ScanOptions& options, SegmentScanCursor& cursor,
                                VectorBatch& output) {
-    SegmentReader* reader = GetSegmentReader(segment_id);
-    if (reader == nullptr) {
-        // 打开失败：本 segment 不可读，视为读完
-        return false;
-    }
-
     // =====================================
     // 第一层：每个 segment 只做一次 metadata 判断
     // =====================================
@@ -396,6 +390,8 @@ bool TableStorage::Scan(const ScanOptions& options, ScanCursor& cursor, VectorBa
         }
         const SegmentId seg_id = segment_ids[cursor.segment_id];
 
+        SegmentReader* reader = GetSegmentReader(seg_id);
+
         // 单 segment 扫描：metadata pruning / batch 读取 / row filtering
         // 与并行路径共用同一份逻辑（ScanSegment）
         SegmentScanCursor segment_cursor;
@@ -404,7 +400,7 @@ bool TableStorage::Scan(const ScanOptions& options, ScanCursor& cursor, VectorBa
         segment_cursor.row_filter_mask = cursor.row_filter_mask;
         segment_cursor.prepared_predicates = cursor.prepared_predicates.get();
 
-        const bool got = ScanSegment(seg_id, options, segment_cursor, output);
+        const bool got = ScanSegment(reader, options, segment_cursor, output);
 
         // 把 segment 内游标状态同步回跨 segment 游标
         cursor.offset_in_segment = segment_cursor.offset;
