@@ -18,8 +18,8 @@ ExecutionEngine::ExecutionEngine(ExecutionContext* ctx) : ctx_(ctx) {
                                  "ExecutionContext");
     }
 
-    // compute pool 由执行层持有（ctx_->thread_pool）；
-    // scan pool 由 storage 侧 ParallelScanSession 自持。
+    // 并行执行使用 ctx_->thread_pool 作为 pipeline worker 线程池；
+    // storage 只提供 query-local 扫描状态（不拥有线程）。
     // 线程池不可用时不创建并行执行器，全部走串行路径。
     if (ctx_->thread_pool != nullptr) {
         parallel_executor_ = std::make_unique<ParallelExecutor>(ctx_, ctx_->thread_pool, ctx_->parallel_config);

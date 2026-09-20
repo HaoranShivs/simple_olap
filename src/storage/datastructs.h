@@ -48,7 +48,7 @@ struct ScanCursor {
 
     // 谓词准备结果：ColumnId->slot、typed literal binding 只做一次。
     // 第一次 Scan 时惰性 Build，之后所有 batch / segment 复用同一份不可变计划。
-    // 并行扫描由 ParallelScanSession 构建一次后共享。
+    // 并行扫描由 ParallelScanGlobalState 构建一次后共享。
     std::shared_ptr<const PreparedScanPredicates> prepared_predicates;
 
     // 进入下一个 segment 时统一调用
@@ -74,7 +74,7 @@ struct SegmentScanCursor {
     //   0: metadata 已证明全部满足（ALL_MATCH）
     std::vector<uint8_t> row_filter_mask;
 
-    // 由调用方（串行 ScanCursor / ParallelScanSession）提供的只读谓词计划。
+    // 由调用方（串行 ScanCursor / ParallelScanLocalState）提供的只读谓词计划。
     // 生命周期由调用方保证覆盖本次 ScanSegment 调用。
     const PreparedScanPredicates* prepared_predicates = nullptr;
 };

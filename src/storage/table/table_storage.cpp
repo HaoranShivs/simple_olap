@@ -7,7 +7,6 @@
 
 #include "../../execution/vector/vector.h"
 #include "../index/table_index_manager.h"
-#include "../scan/parallel_scan_session.h"
 #include "../scan/row_filter.h"
 
 namespace simple_olap {
@@ -356,7 +355,7 @@ bool TableStorage::ScanSegment(SegmentReader* reader, const ScanOptions& options
 
     if (need_row_filter) {
         if (cursor.prepared_predicates == nullptr) {
-            // 调用方（Scan / ParallelScanSession）必须提前准备谓词计划
+            // 调用方（Scan / ScanParallel）必须提前准备谓词计划
             throw std::runtime_error("scan predicates not prepared before ScanSegment");
         }
 
@@ -446,16 +445,67 @@ bool TableStorage::ReadRows(SegmentId segment_id, const std::vector<uint32_t>& r
 
 // ---------- 并行扫描 ----------
 
-std::shared_ptr<BatchStream> TableStorage::CreateParallelScan(const ScanOptions& options, size_t scan_threads,
-                                                              size_t queue_capacity) {
-    // 谓词计划只准备一次，所有 scan worker 只读共享。
-    std::shared_ptr<const PreparedScanPredicates> prepared;
+std::unique_ptr<ParallelScanGlobalState> TableStorage::CreateParallelScanState(const ScanOptions& options) {
+    auto state = std::make_unique<ParallelScanGlobalState>();
+
+    // segment 列表在查询开始时快照一次：查询期间 Flush 新落盘的 segment
+    // 不进入本次扫描（与串行 Scan 的可见性语义一致）。
+    state->segment_ids = metadata_.segment_ids;
+
+    // 谓词计划只准备一次，所有 worker 只读共享。
     if (!options.predicates.empty()) {
-        prepared = PrepareScanPredicates(options);
+        state->prepared_predicates = PrepareScanPredicates(options);
     }
 
-    return std::make_shared<ParallelScanSession>(this, metadata_.segment_ids, options, std::move(prepared),
-                                                 scan_threads, queue_capacity, buffer_pool_);
+    return state;
+}
+
+bool TableStorage::ScanParallel(const ScanOptions& options, ParallelScanGlobalState& global_state,
+                                ParallelScanLocalState& local_state, VectorBatch& output) {
+    while (true) {
+        if (global_state.cancelled.load(std::memory_order_relaxed)) {
+            return false;
+        }
+
+        // 没有 segment 时原子领取一个；同一 segment 的 64 个 batch
+        // 全部由本 worker 连续扫描（reader 只解析一次）。
+        if (!local_state.has_segment) {
+            const std::optional<SegmentId> claimed = global_state.ClaimSegment();
+            if (!claimed.has_value()) {
+                return false; // 所有 segment 都被领完
+            }
+
+            SegmentReader* reader = GetSegmentReader(*claimed);
+            if (reader == nullptr) {
+                // 已登记进 table.meta 的 segment 打开失败：此时继续扫描会
+                // 静默丢数据、改变查询结果，宁可报内部错误。
+                throw std::runtime_error("TableStorage::ScanParallel - failed to open segment " +
+                                         std::to_string(*claimed));
+            }
+
+            local_state.segment_id = *claimed;
+            local_state.reader = reader;
+            local_state.cursor = SegmentScanCursor{};
+            local_state.cursor.prepared_predicates = global_state.prepared_predicates.get();
+            local_state.has_segment = true;
+        }
+
+        // 单 segment 扫描：metadata pruning / batch 读取 / row filtering
+        // 与串行路径共用同一份逻辑（ScanSegment）。
+        const bool got = ScanSegment(local_state.reader, options, local_state.cursor, output);
+
+        if (!got) {
+            local_state.ResetSegment();
+            continue;
+        }
+
+        if (output.size == 0) {
+            // 本批全部被行过滤：继续读同一 segment 的下一批
+            continue;
+        }
+
+        return true;
+    }
 }
 
 } // namespace simple_olap

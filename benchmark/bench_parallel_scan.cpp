@@ -3,9 +3,12 @@
 // 并行扫描（多线程）与串行扫描（单线程）的运行时间对比。
 //
 // 设计要点：
-//   - 串行路径 TableStorage::Scan 与并行路径 ParallelScanSession 共用同一份
+//   - 串行路径 TableStorage::Scan 与并行路径 TableStorage::ScanParallel 共用同一份
 //     ScanSegment 逻辑（metadata pruning / batch 读取 / row filtering），
 //     因此两者的吞吐差异来自并发度而非算法差异。
+//   - 并行路径为 morsel-driven：本基准自己创建 worker 线程，
+//     每个 worker 持有 query-local ParallelScanGlobalState（共享）与
+//     ParallelScanLocalState（独有），atomic 领取 segment 后连续扫描。
 //   - 计时前把数据 Flush 落盘，Scan 只读已落盘 segment。
 //   - 串行 ScanCursor 把进度（segment 下标）保存在游标自身，因此同一个
 //     TableStorage 实例可以被反复、并发地扫描；本基准在计时区间外只 Open
@@ -25,7 +28,7 @@
 //
 // 用法：
 //   bench_parallel_scan [--rows N] [--repeats R] [--warmup W]
-//                       [--threads 1,2,4,8] [--load-batch B] [--queue Q]
+//                       [--threads 1,2,4,8] [--load-batch B]
 //                       [--scenario scan|filter|all] [--data DIR] [--help]
 
 #include <algorithm>
@@ -33,6 +36,7 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -47,9 +51,10 @@
 #include "bench_common.h"
 #include "execution/batch_utils.h"
 #include "execution/vector/vector.h"
+#include "parallel/thread_pool/thread_pool.h"
 #include "storage/datachunk.h"
 #include "storage/datastructs.h"
-#include "storage/scan/parallel_scan_session.h"
+#include "storage/scan/parallel_scan_state.h"
 #include "storage/table/table_storage.h"
 #include "type.h"
 
@@ -67,8 +72,7 @@ struct Options {
     int repeats = 5;                // 每个配置的计时轮数
     int warmup = 2;                 // 每配置预热轮数
     uint32_t batch_rows = 8192;     // 写入侧 DataChunk 行数
-    size_t queue_capacity = 16;     // 并行队列容量（对齐 ParallelConfig）
-    std::vector<size_t> threads;    // 待测并行线程数
+    std::vector<size_t> threads;    // 待测并行 worker 数
     std::string scenario = "all";   // scan | filter | all
     std::filesystem::path data_dir; // 落盘目录
 };
@@ -171,20 +175,38 @@ ScanCounters RunSerialOnce(TableStorage* table, const ScanOptions& opts) {
     return counters;
 }
 
-// 一次并行全表扫描：scan worker 从队列推 batch，这里只做消费（count）。
-ScanCounters RunParallelOnce(TableStorage* table, const ScanOptions& opts, size_t threads, size_t queue_capacity) {
-    std::shared_ptr<BatchStream> stream = table->CreateParallelScan(opts, threads, queue_capacity);
-    std::static_pointer_cast<ParallelScanSession>(stream)->Start(); // 幂等启动 scan worker
+// 一次并行全表扫描：多个 worker 共享 global state，各自持有 local state，
+// 由 storage atomic 分配 segment；这里只做消费（count）。
+ScanCounters RunParallelOnce(TableStorage* table, const ScanOptions& opts, size_t threads) {
+    std::unique_ptr<ParallelScanGlobalState> state = table->CreateParallelScanState(opts);
 
-    ScanCounters counters;
-    VectorBatch batch;
-    while (stream->Next(batch)) {
-        ++counters.batches;
-        counters.input_rows += PhysicalRowCount(batch);
-        counters.output_rows += ActiveRowCount(batch);
-        batch.Reset();
+    ThreadPool pool(std::max<size_t>(1, threads));
+
+    std::vector<std::future<ScanCounters>> futures;
+    futures.reserve(pool.thread_count());
+    for (size_t i = 0; i < pool.thread_count(); ++i) {
+        futures.push_back(pool.Submit([table, &opts, state = state.get()]() -> ScanCounters {
+            ScanCounters counters;
+            ParallelScanLocalState local;
+            VectorBatch batch;
+            while (table->ScanParallel(opts, *state, local, batch)) {
+                ++counters.batches;
+                counters.input_rows += PhysicalRowCount(batch);
+                counters.output_rows += ActiveRowCount(batch);
+                batch.Reset();
+            }
+            return counters;
+        }));
     }
-    return counters;
+
+    ScanCounters total;
+    for (auto& future : futures) {
+        const ScanCounters counters = future.get();
+        total.batches += counters.batches;
+        total.input_rows += counters.input_rows;
+        total.output_rows += counters.output_rows;
+    }
+    return total;
 }
 
 // 预热 + 多轮计时，返回 best / median / mean / p95 耗时（毫秒）。
@@ -258,9 +280,7 @@ void RunScenario(const std::string& title, bool with_filter, const Options& opt,
     PrintTableRow("serial", 1, serial, serial.median_ms);
 
     for (size_t threads : opt.threads) {
-        const auto parallel_fn = [&] {
-            return RunParallelOnce(table.get(), scan_options, threads, opt.queue_capacity);
-        };
+        const auto parallel_fn = [&] { return RunParallelOnce(table.get(), scan_options, threads); };
         const TimingStats stats = TimeIt(parallel_fn, opt.warmup, opt.repeats);
         PrintTableRow("parallel", threads, stats, serial.median_ms);
 
@@ -280,8 +300,7 @@ void PrintUsage(const char* argv0) {
               << "  --warmup W         预热轮数（默认 2）\n"
               << "  --load-batch B     写入侧 DataChunk 行数（默认 8192）\n"
               << "  --batch B          --load-batch 的兼容别名\n"
-              << "  --queue Q          并行批队列容量（默认 16）\n"
-              << "  --threads 1,2,4,8  待测并行线程数（默认 1,2,4,8 截断到硬件并发度）\n"
+              << "  --threads 1,2,4,8  待测并行 worker 数（默认 1,2,4,8 截断到硬件并发度）\n"
               << "  --scenario S       scan | filter | all（默认 all）\n"
               << "  --data DIR         数据落盘目录\n"
               << "  --help             显示本帮助\n";
@@ -343,8 +362,6 @@ Options ParseArgs(int argc, char** argv) {
             opt.warmup = std::stoi(value());
         } else if (arg == "--load-batch" || arg == "--batch") {
             opt.batch_rows = static_cast<uint32_t>(std::stoul(value()));
-        } else if (arg == "--queue") {
-            opt.queue_capacity = static_cast<size_t>(std::stoul(value()));
         } else if (arg == "--threads") {
             opt.threads = ParseThreads(value());
         } else if (arg == "--scenario") {
@@ -381,7 +398,6 @@ int main(int argc, char** argv) {
                   << "  rows         : " << opt.rows << "\n"
                   << "  load_batch   : " << opt.batch_rows << " (write-side DataChunk rows)\n"
                   << "  repeats      : " << opt.repeats << " (warmup " << opt.warmup << ")\n"
-                  << "  queue        : " << opt.queue_capacity << "\n"
                   << "  hardware     : " << std::thread::hardware_concurrency() << " threads\n"
                   << "  data dir     : " << opt.data_dir << "\n";
 

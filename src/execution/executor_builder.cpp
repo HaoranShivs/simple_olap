@@ -209,10 +209,10 @@ BuiltExecutor ExecutorBuilder::BuildNode(const PhysicalPlan& plan, const Executo
 BuiltExecutor ExecutorBuilder::BuildSeqScan(const PhysicalSeqScan& plan, const ExecutorBuildOptions& options) const {
     BuiltScanSpec spec = BuildScanSpec(plan);
 
-    if (options.scan_stream != nullptr) {
-        // 并行模式：SeqScan 消费共享的 BatchStream
+    if (options.parallel_scan != nullptr) {
+        // 并行模式：SeqScan 使用查询级全局扫描状态（worker 本地状态由算子自持）
         return BuiltExecutor{
-            std::make_unique<SeqScanOperator>(spec.table_id, std::move(spec.options), options.scan_stream, ctx_),
+            std::make_unique<SeqScanOperator>(spec.table_id, std::move(spec.options), options.parallel_scan, ctx_),
             std::move(spec.output_schema)};
     }
 
@@ -222,7 +222,7 @@ BuiltExecutor ExecutorBuilder::BuildSeqScan(const PhysicalSeqScan& plan, const E
 }
 
 BuiltExecutor ExecutorBuilder::BuildIndexScan(const PhysicalIndexScan& plan, const ExecutorBuildOptions& options) const {
-    // INDEX_SCAN 不参与并行扫描（无 BatchStream），options 无需使用
+    // INDEX_SCAN 不参与并行扫描（无 ParallelScanGlobalState），options 无需使用
     (void)options;
 
     const TableCatalogEntry* entry = ctx_->catalog->GetTable(plan.GetTableOid());

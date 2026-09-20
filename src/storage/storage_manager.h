@@ -26,8 +26,8 @@ class TableSchema;
 class StorageManager {
   public:
     // buffer_pool 由 Database 注入（Database 生命周期覆盖 StorageManager），
-    // 沿 StorageManager -> TableStorage -> ParallelScanSession 传递，
-    // 使扫描产出的 VectorBatch 绑定 BufferPool。
+    // 沿 StorageManager -> TableStorage 传递，使扫描产出的 VectorBatch
+    // 绑定 BufferPool。
     StorageManager(std::filesystem::path db_path, BufferPool* buffer_pool);
 
     StorageManager(const StorageManager&) = delete;

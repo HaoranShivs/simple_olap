@@ -75,8 +75,8 @@ class ExecutionEngine {
 
     ExecutionContext* ctx_ = nullptr;
 
-    // 并行聚合执行器（compute pool = ctx_->thread_pool；
-    // scan pool 由 ParallelScanSession 在 storage 侧自持）。
+    // 并行执行器（pipeline worker 全部来自 ctx_->thread_pool；
+    // storage 只提供 query-local 扫描状态，不拥有线程）。
     // 线程池不可用时为空，全部查询走串行路径。
     std::unique_ptr<ParallelExecutor> parallel_executor_;
 };

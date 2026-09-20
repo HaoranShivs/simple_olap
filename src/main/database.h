@@ -88,7 +88,7 @@ class Database {
     std::filesystem::path path_; // 数据库根目录
     DatabaseConfig config_;
 
-    // 内存池：必须比 QueryMemoryContext / VectorBatch / ParallelScanSession 活得更久。
+    // 内存池：必须比 QueryMemoryContext / VectorBatch / pipeline worker 活得更久。
     // 注意成员初始化顺序：block_pool_ / buffer_pool_ 在 storage_manager_ 之前构造。
     BlockPool block_pool_;
     BufferPool buffer_pool_;

@@ -342,10 +342,9 @@ void PrintHelp() {
               << "  exit | quit    -- leave the REPL\n"
               << "CLI options:\n"
               << "  --mode auto|single|multi   initial execution mode\n"
-              << "  --threads N                compute/scan worker count\n"
-              << "  --scan-threads N           storage scan worker count\n"
-              << "  --compute-threads N        compute worker count\n"
-              << "  --queue N                  parallel batch queue capacity\n"
+              << "  --threads N                database thread pool + max pipeline workers\n"
+              << "  --query-workers N          max pipeline workers per query\n"
+              << "  --queue N                  result queue capacity (non-aggregate SELECT)\n"
               << "  --db DIR                   override database root directory\n"
               << "  --gen-table NAME           generate (id INT64, value DOUBLE) table\n"
               << "  --rows N                   rows to generate (default 4000000)\n"
@@ -372,7 +371,7 @@ int main(int argc, char** argv) {
     uint64_t gen_rows = 4'000'000;
     uint32_t gen_batch = 8192;
 
-    // 命令行：--mode auto|single|multi，--threads N
+    // 命令行：--mode auto|single|multi，--threads N，--query-workers N
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--mode" && i + 1 < argc) {
@@ -389,15 +388,12 @@ int main(int argc, char** argv) {
             }
         } else if (arg == "--threads" && i + 1 < argc) {
             config.thread_count = static_cast<size_t>(std::stoul(argv[++i]));
-            // --threads 同时决定并行 compute / scan 的 worker 数
-            config.parallel_config.compute_threads = config.thread_count;
-            config.parallel_config.scan_threads = config.thread_count;
-        } else if (arg == "--compute-threads" && i + 1 < argc) {
-            config.parallel_config.compute_threads = static_cast<size_t>(std::stoul(argv[++i]));
-        } else if (arg == "--scan-threads" && i + 1 < argc) {
-            config.parallel_config.scan_threads = static_cast<size_t>(std::stoul(argv[++i]));
+            // --threads 同时决定数据库线程池与单查询最大 pipeline worker 数
+            config.parallel_config.worker_threads = config.thread_count;
+        } else if (arg == "--query-workers" && i + 1 < argc) {
+            config.parallel_config.worker_threads = static_cast<size_t>(std::stoul(argv[++i]));
         } else if (arg == "--queue" && i + 1 < argc) {
-            config.parallel_config.batch_queue_capacity = static_cast<size_t>(std::stoul(argv[++i]));
+            config.parallel_config.result_queue_capacity = static_cast<size_t>(std::stoul(argv[++i]));
         } else if ((arg == "--db" || arg == "--database") && i + 1 < argc) {
             database_path = argv[++i];
         } else if (arg == "--gen-table" && i + 1 < argc) {

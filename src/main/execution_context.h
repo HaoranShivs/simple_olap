@@ -39,7 +39,7 @@ struct DatabaseConfig {
     ExecutionMode execution_mode = ExecutionMode::AUTO;
 
     // 并行执行参数：由 Connection 注入到每条语句的 ExecutionContext，
-    // 最终决定 ParallelExecutor 的 scan 线程数 / compute 线程数 / 队列容量。
+    // 最终决定 ParallelExecutor 的 pipeline worker 数 / 结果队列容量。
     ParallelConfig parallel_config;
 };
 

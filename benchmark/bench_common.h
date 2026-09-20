@@ -71,9 +71,13 @@ struct BenchOptions {
     ExecutionMode execution_mode = ExecutionMode::SINGLE_THREAD;
 
     size_t thread_count = 1;
-    size_t scan_threads = 1;
-    size_t compute_threads = 1;
-    size_t queue_capacity = 16;
+
+    // 单查询最大 pipeline worker 数（morsel-driven，scan/filter/project/partial agg
+    // 全部由同一 worker 连续执行）。
+    size_t worker_threads = 1;
+
+    // 仅非聚合并行查询的最终结果交接队列容量。
+    size_t result_queue_capacity = 16;
 
     // 内存消融：SYSTEM(new_delete) vs ARENA；DIRECT vs POOLED。
     QueryMemoryMode memory_mode = QueryMemoryMode::ARENA;

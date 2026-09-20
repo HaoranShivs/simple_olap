@@ -255,10 +255,9 @@ void PrintUsage() {
         "  --duration S          每个模式测量秒数（默认 60）\n"
         "  --min-samples N       样本不足时自动追加测量轮次，直到达到 N（默认 2000）\n"
         "  --mode MODE           single|multi|auto（默认 single；client 并发固定用 single）\n"
-        "  --threads N           scan/compute 线程数（同时设置两者）\n"
-        "  --scan-threads N      storage scan 线程数\n"
-        "  --compute-threads N   compute 线程数\n"
-        "  --queue N             batch queue 容量（默认 16）\n"
+        "  --threads N           pipeline worker 数（morsel-driven，单查询并行度）\n"
+        "  --query-workers N     --threads 的别名（只影响单查询并行度）\n"
+        "  --queue N             结果交接队列容量（非聚合 SELECT，默认 16）\n"
         "  --memory MODE         arena|system（默认 arena）\n"
         "  --buffer-mode MODE    pooled|direct（默认 pooled）\n"
         "  --block-cache N       BlockPool max_cached_blocks（默认 64）\n"
@@ -323,16 +322,10 @@ Args ParseArgs(int argc, char** argv) {
             if (!ParseExecutionMode(next("--mode"), args.opts.execution_mode)) {
                 throw std::runtime_error("invalid --mode");
             }
-        } else if (arg == "--threads") {
-            const size_t n = std::stoul(next("--threads"));
-            args.opts.scan_threads = n;
-            args.opts.compute_threads = n;
-        } else if (arg == "--scan-threads") {
-            args.opts.scan_threads = std::stoul(next("--scan-threads"));
-        } else if (arg == "--compute-threads") {
-            args.opts.compute_threads = std::stoul(next("--compute-threads"));
+        } else if (arg == "--threads" || arg == "--query-workers") {
+            args.opts.worker_threads = std::stoul(next("--threads"));
         } else if (arg == "--queue") {
-            args.opts.queue_capacity = std::stoul(next("--queue"));
+            args.opts.result_queue_capacity = std::stoul(next("--queue"));
         } else if (arg == "--memory") {
             const std::string mode = next("--memory");
             if (mode == "arena") {
@@ -674,7 +667,7 @@ MeasurementResult RunMeasurement(Database& database, const std::vector<Workload>
 // ==========================================================
 
 const char* kCsvHeader =
-    "benchmark,backend,workload,result_mode,rows,clients,execution_mode,scan_threads,compute_threads,memory_mode,"
+    "benchmark,backend,workload,result_mode,rows,clients,execution_mode,worker_threads,memory_mode,"
     "buffer_mode,block_cache,buffer_cache,elapsed_s,queries,qps,mean_us,min_us,p50_us,p95_us,p99_us,max_us,"
     "p99_reliable,block_system_alloc,block_system_free,block_hits,block_returns,"
     "buffer_system_alloc,buffer_system_free,buffer_hits,buffer_returns";
@@ -732,10 +725,10 @@ int main(int argc, char** argv) {
     config.query_memory_mode = opts.memory_mode;
     config.buffer_pool_mode = opts.buffer_pool_mode;
     config.execution_mode = opts.execution_mode;
-    config.parallel_config.scan_threads = std::max<size_t>(1, opts.scan_threads);
-    config.parallel_config.compute_threads = std::max<size_t>(1, opts.compute_threads);
-    config.parallel_config.batch_queue_capacity = std::max<size_t>(1, opts.queue_capacity);
-    config.thread_count = std::max(config.thread_count, opts.compute_threads + 2);
+    config.parallel_config.worker_threads = std::max<size_t>(1, opts.worker_threads);
+    config.parallel_config.result_queue_capacity = std::max<size_t>(1, opts.result_queue_capacity);
+    // 线程池必须至少能同时容纳全部 pipeline worker
+    config.thread_count = std::max(config.thread_count, opts.worker_threads);
 
     Database database(opts.db_path, config);
 
@@ -765,12 +758,12 @@ int main(int argc, char** argv) {
     std::printf("=== bench_query_workload ===\n");
     PrintEnvironment(env);
     std::printf("config: backend=%s workload=%s rows=%llu segments=%zu load_batch=%u clients=%zu execution=%s "
-                "scan=%zu compute=%zu queue=%zu memory=%s buffer=%s block_cache=%zu buffer_cache=%zu\n",
+                "workers=%zu queue=%zu memory=%s buffer=%s block_cache=%zu buffer_cache=%zu\n",
                 backend.c_str(), WorkloadName(args.workload), static_cast<unsigned long long>(opts.rows),
                 segment_count, args.load_batch_rows, opts.clients, ExecutionModeName(opts.execution_mode),
-                config.parallel_config.scan_threads, config.parallel_config.compute_threads,
-                config.parallel_config.batch_queue_capacity, MemoryModeName(opts.memory_mode),
-                BufferPoolModeName(opts.buffer_pool_mode), opts.block_pool_cache, opts.buffer_pool_cache);
+                config.parallel_config.worker_threads, config.parallel_config.result_queue_capacity,
+                MemoryModeName(opts.memory_mode), BufferPoolModeName(opts.buffer_pool_mode), opts.block_pool_cache,
+                opts.buffer_pool_cache);
     std::printf("measure: warmup=%us duration=%us min_samples=%llu result_modes=", opts.warmup_seconds,
                 opts.duration_seconds, static_cast<unsigned long long>(opts.min_samples));
     for (size_t i = 0; i < args.result_modes.size(); ++i) {
@@ -816,12 +809,12 @@ int main(int argc, char** argv) {
         if (!args.csv_path.empty()) {
             char row[2048];
             std::snprintf(row, sizeof(row),
-                          "query_workload,%s,%s,%s,%llu,%zu,%s,%zu,%zu,%s,%s,%zu,%zu,%.3f,%llu,%.2f,%.1f,%llu,%llu,"
+                          "query_workload,%s,%s,%s,%llu,%zu,%s,%zu,%s,%s,%zu,%zu,%.3f,%llu,%.2f,%.1f,%llu,%llu,"
                           "%llu,%llu,%llu,%d,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu",
                           backend.c_str(), WorkloadName(args.workload), ResultModeName(mode),
                           static_cast<unsigned long long>(opts.rows), opts.clients,
-                          ExecutionModeName(opts.execution_mode), config.parallel_config.scan_threads,
-                          config.parallel_config.compute_threads, MemoryModeName(opts.memory_mode),
+                          ExecutionModeName(opts.execution_mode), config.parallel_config.worker_threads,
+                          MemoryModeName(opts.memory_mode),
                           BufferPoolModeName(opts.buffer_pool_mode), opts.block_pool_cache, opts.buffer_pool_cache,
                           stats.elapsed_seconds, static_cast<unsigned long long>(stats.query_count), stats.qps,
                           stats.mean_us, static_cast<unsigned long long>(stats.min_us),

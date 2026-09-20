@@ -59,7 +59,10 @@ PlannedQuery PlanQuery(Database& database, std::string_view sql) {
 //   一条 SQL 一个 QueryMemoryContext（coordinator Arena + worker Arenas），
 //   由 RAII 在返回时归还 BlockPool。
 ExecutionResult RunPlannedQuery(Database& database, const PhysicalPlan& physical, const BatchConsumer& consumer) {
-    const size_t worker_count = std::max<size_t>(1, database.GetConfig().parallel_config.compute_threads);
+    // worker Arena 数量与并行执行器的实际 worker 上界一致：
+    // min(配置上限, 线程池大小)，且至少 1（供空表 global aggregate 使用）。
+    const size_t worker_count = std::max<size_t>(
+        1, std::min(database.GetConfig().parallel_config.worker_threads, database.GetThreadPool().thread_count()));
 
     QueryMemoryContext query_memory(database.GetBlockPool(), worker_count,
                                     database.GetConfig().query_memory_mode);
@@ -70,7 +73,7 @@ ExecutionResult RunPlannedQuery(Database& database, const PhysicalPlan& physical
     // 执行模式来自 DatabaseConfig：可在运行期切换单线程 / 多线程
     ctx.execution_mode = database.GetConfig().execution_mode;
 
-    // 并行参数来自 DatabaseConfig：注入 scan/compute 线程数与批队列容量
+    // 并行参数来自 DatabaseConfig：注入 pipeline worker 数与结果队列容量
     ctx.parallel_config = database.GetConfig().parallel_config;
 
     ExecutionEngine engine(&ctx);

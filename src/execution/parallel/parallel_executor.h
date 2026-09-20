@@ -23,20 +23,28 @@ namespace simple_olap {
 //   - 链上只有一个 SeqScan（叶子）
 bool CanParallelizeAggregate(const PhysicalPlan& plan);
 
-// 并行聚合执行器。
+// 并行执行器（morsel-driven，query-local global/local scan state）。
 //
 // 运行结构：
 //
-//   Storage Stage（ParallelScanSession 内部 scan 线程）
-//        |  BoundedBatchQueue
-//        v
-//   Compute Stage（compute_pool 线程，每条 pipeline：
-//        SeqScan(BatchStream) -> Filter -> Projection -> HashAggregateState::Consume）
-//        |  future<HashAggregateState>
-//        v
-//   Coordinator（调用 ExecuteAggregate 的线程）：Merge -> Finalize -> consumer
+//   ParallelScanGlobalState（segment_ids + atomic next_segment + cancel）
+//        │
+//   ┌────┴─────────────────────────┐
+//   ▼                              ▼
+// worker 0                       worker N        （compute_pool 线程）
+//   │ Claim Segment                │ Claim Segment
+//   │ Scan -> Filter -> Project    │ ...
+//   │ Partial Aggregate (local)    │ Partial Aggregate (local)
+//   └────────────┬─────────────────┘
+//                │ future<HashAggregateState>
+//                ▼
+//   Coordinator（调用 ExecuteAggregate 的线程）：
+//        Merge -> Finalize -> consumer
 //
-// submit / future / get / Merge 全部限制在 ExecuteAggregate() 函数作用域内。
+// 整条 pipeline 中不存在 BatchStream / scan 线程池 / batch 队列：
+// worker 自己就是 scan 的生产者，每个 segment 只做一次 atomic fetch_add。
+//
+// submit / future / get / Merge 全部限制在 Execute*() 函数作用域内。
 class ParallelExecutor {
   public:
     ParallelExecutor(ExecutionContext* ctx, ThreadPool* compute_pool, ParallelConfig config = {});
@@ -45,8 +53,9 @@ class ParallelExecutor {
     ExecutionResult ExecuteAggregate(const PhysicalHashAggregate& plan, const BatchConsumer& consumer);
 
     // 执行并行非聚合查询（要求 CanParallelizeAggregate(plan) == true，
-    // 且 root 不是 HASH_AGGREGATE）。worker 从共享 BatchStream 拉取批次，
-    // 经 Filter / Projection 处理后将结果批次推入结果队列，由调用线程消费。
+    // 且 root 不是 HASH_AGGREGATE）。worker 各自完成
+    // Scan -> Filter -> Projection，只把最终结果批次推入结果队列，
+    // 由调用线程消费（结果队列是唯一的交接边界）。
     ExecutionResult ExecuteQuery(const PhysicalPlan& plan, const BatchConsumer& consumer);
 
   private:

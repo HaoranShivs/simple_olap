@@ -4,7 +4,7 @@
 #include <vector>
 
 #include "../planner/physical_plan/physical_plan.h"
-#include "../storage/scan/batch_stream.h"
+#include "../storage/scan/parallel_scan_state.h"
 #include "aggregate/hash_aggregate_state.h"
 #include "execution_context.h"
 #include "expression/exec_expression.h"
@@ -18,10 +18,11 @@ struct BuiltExecutor {
     ExecSchema output_schema;
 };
 
-// 并行构建上下文：只有 BuildSeqScan() 使用 scan_stream，
+// 并行构建上下文：只有 BuildSeqScan() 读取 parallel_scan，
 // Filter / Projection 不保存它。
+// parallel_scan == nullptr 表示串行 SeqScan。
 struct ExecutorBuildOptions {
-    std::shared_ptr<BatchStream> scan_stream;
+    ParallelScanGlobalState* parallel_scan = nullptr;
 };
 
 // PhysicalSeqScan -> ScanOptions / output schema 的可复用转换结果。
@@ -49,7 +50,7 @@ class ExecutorBuilder {
     // command executor rather than fake streaming operators.
     BuiltExecutor Build(const PhysicalPlan& plan) const;
 
-    // 并行构建模式：SeqScan 消费指定的 BatchStream
+    // 并行构建模式：SeqScan 使用查询级 ParallelScanGlobalState
     BuiltExecutor Build(const PhysicalPlan& plan, const ExecutorBuildOptions& options) const;
 
     // PhysicalSeqScan -> (table_id, ScanOptions, output_schema)

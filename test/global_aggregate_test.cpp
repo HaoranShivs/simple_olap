@@ -18,14 +18,19 @@
 #include <cstdio>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include "catalog/catalog.h"
 #include "execution/expression/exec_expression.h"
 #include "main/connection.h"
 #include "main/database.h"
 #include "main/query_result.h"
+#include "storage/datachunk.h"
+#include "storage/table/table_storage.h"
 #include "type.h"
 
 using namespace simple_olap;
@@ -287,6 +292,150 @@ int main() {
         database.SetExecutionMode(ExecutionMode::AUTO);
         Check(single.empty(), "empty group by: single outputs no rows");
         Check(multi.empty(), "empty group by: multi outputs no rows");
+    }
+
+    // ---------- 9. 多 segment 并行扫描（morsel-driven global/local scan state） ----------
+    //
+    // 前面的 agg_t 只有 3000 行（1 个 segment），并行路径实际只有 1 个 worker
+    // 有效。本节直接通过 storage API 写入 >2 个 segment，覆盖：
+    //   - N 个 worker 各自 atomic 领取 segment，不重不漏
+    //   - metadata pruning（某 segment 全部命中 / 部分命中 / 全部跳过）
+    //   - row filter mask（pruning 无法决定的 segment 逐行过滤）
+    //   - worker 数 > / < segment 数的两种截断
+    {
+        connection.Query("CREATE TABLE multi_t (id INT, g INT, value DOUBLE);");
+
+        const TableCatalogEntry* entry = database.GetCatalog().GetTable("multi_t");
+        Check(entry != nullptr, "multi_t catalog entry");
+        Check(entry != nullptr && !entry->schema.columns.empty() && entry->schema.columns[0].type == DataType::INT32,
+              "multi_t id column is INT32");
+        auto storage = database.GetStorageManager().GetTable(entry->table_id, entry->schema);
+        Check(storage != nullptr, "multi_t storage");
+
+        constexpr uint32_t kMultiN = 150000; // 3 个 segment（> 2 * kMaxSegmentRowCount）
+        constexpr int32_t kMultiGroups = 5;
+
+        uint32_t expected_count = 0;
+        long double expected_sum = 0.0L;
+        int32_t expected_min = INT32_MAX;
+        int32_t expected_max = INT32_MIN;
+        uint32_t expected_count_ge = 0;
+        long double expected_sum_ge = 0.0L;
+        std::map<int32_t, std::pair<int64_t, long double>> expected_groups;
+
+        uint32_t written = 0;
+        while (written < kMultiN) {
+            const uint32_t n = static_cast<uint32_t>(std::min<uint32_t>(8192, kMultiN - written));
+
+            auto id_buf = std::shared_ptr<uint8_t[]>(new uint8_t[static_cast<size_t>(n) * sizeof(int32_t)]);
+            auto g_buf = std::shared_ptr<uint8_t[]>(new uint8_t[static_cast<size_t>(n) * sizeof(int32_t)]);
+            auto value_buf = std::shared_ptr<uint8_t[]>(new uint8_t[static_cast<size_t>(n) * sizeof(double)]);
+            auto* ids = reinterpret_cast<int32_t*>(id_buf.get());
+            auto* gs = reinterpret_cast<int32_t*>(g_buf.get());
+            auto* values = reinterpret_cast<double*>(value_buf.get());
+
+            for (uint32_t r = 0; r < n; ++r) {
+                const int32_t id = static_cast<int32_t>(written + r);
+                const int32_t g = id % kMultiGroups;
+                const double value = static_cast<double>(id) * 0.25 + 2.0;
+
+                ids[r] = id;
+                gs[r] = g;
+                values[r] = value;
+
+                ++expected_count;
+                expected_sum += id;
+                expected_min = std::min(expected_min, id);
+                expected_max = std::max(expected_max, id);
+                if (id >= static_cast<int32_t>(kMultiN * 2 / 3)) {
+                    ++expected_count_ge;
+                    expected_sum_ge += id;
+                }
+                auto& group = expected_groups[g];
+                group.first += 1;
+                group.second += id;
+            }
+
+            DataChunk chunk(n);
+            chunk.set_data(0, id_buf, sizeof(int32_t));
+            chunk.set_data(1, g_buf, sizeof(int32_t));
+            chunk.set_data(2, value_buf, sizeof(double));
+            storage->Append(chunk);
+
+            written += n;
+        }
+
+        // Flush 后活跃 segment 封存落盘，segment_ids 才包含全部 3 个 segment
+        database.GetStorageManager().Flush();
+        Check(storage->segment_count() >= 3, "multi_t spans at least 3 segments");
+
+        // 9.1 全局聚合：N worker partial aggregate + coordinator merge
+        CheckSingleRow(RunBothModes(database, connection,
+                                    "SELECT COUNT(*), SUM(id), MIN(id), MAX(id) FROM multi_t;", "multi global"),
+                       {I64(expected_count), I64(static_cast<int64_t>(expected_sum)), I64(expected_min),
+                        I64(expected_max)},
+                       "multi global values");
+
+        // 9.2 metadata pruning + row filter：第一段全部跳过、第二段逐行过滤、第三段全部命中
+        CheckSingleRow(RunBothModes(database, connection,
+                                    "SELECT COUNT(*), SUM(id) FROM multi_t WHERE id >= 100000;", "multi filter"),
+                       {I64(expected_count_ge), I64(static_cast<int64_t>(expected_sum_ge))}, "multi filter values");
+
+        // 9.3 0% 命中：全部 segment 被 metadata pruning 跳过，global aggregate 仍输出一行 0
+        CheckSingleRow(
+            RunBothModes(database, connection, "SELECT COUNT(*), SUM(id) FROM multi_t WHERE id < 0;", "multi 0%"),
+            {I64(0), I64(0)}, "multi 0% values");
+
+        // 9.4 GROUP BY 回归：按 group key 校验（并行输出顺序不做保证）
+        {
+            const std::string sql = "SELECT g, COUNT(*), SUM(id) FROM multi_t GROUP BY g;";
+            database.SetExecutionMode(ExecutionMode::SINGLE_THREAD);
+            const std::vector<Row> single = CollectRows(connection.Query(sql));
+            database.SetExecutionMode(ExecutionMode::MULTI_THREAD);
+            const std::vector<Row> multi = CollectRows(connection.Query(sql));
+            database.SetExecutionMode(ExecutionMode::AUTO);
+
+            if (single.size() != expected_groups.size() || multi.size() != expected_groups.size()) {
+                Fail("multi group by: group count mismatch");
+            } else {
+                auto check = [&](const std::vector<Row>& rows, const std::string& mode) {
+                    for (const Row& row : rows) {
+                        const int32_t g = static_cast<int32_t>(ExecValueAsNumber(row[0]));
+                        auto it = expected_groups.find(g);
+                        if (it == expected_groups.end()) {
+                            Fail("multi group by " + mode + ": unexpected group");
+                            continue;
+                        }
+                        if (static_cast<int64_t>(ExecValueAsNumber(row[1])) != it->second.first ||
+                            std::fabs(static_cast<double>(ExecValueAsNumber(row[2]) - it->second.second)) > 1e-6) {
+                            Fail("multi group by " + mode + ": value mismatch");
+                        }
+                    }
+                };
+                check(single, "single");
+                check(multi, "multi");
+            }
+        }
+
+        // 9.5 并发查询同一张表：扫描状态必须 query-local，
+        //     两个查询不能争抢同一个 next_segment。
+        {
+            database.SetExecutionMode(ExecutionMode::MULTI_THREAD);
+            Connection connection_a(database);
+            Connection connection_b(database);
+
+            const std::string sql = "SELECT COUNT(*), SUM(id) FROM multi_t WHERE id >= 50000;";
+            std::vector<Row> rows_a;
+            std::vector<Row> rows_b;
+
+            std::thread thread_a([&] { rows_a = CollectRows(connection_a.Query(sql)); });
+            std::thread thread_b([&] { rows_b = CollectRows(connection_b.Query(sql)); });
+            thread_a.join();
+            thread_b.join();
+
+            database.SetExecutionMode(ExecutionMode::AUTO);
+            CheckRowsEqual(rows_a, rows_b, "concurrent queries on same table");
+        }
     }
 
     if (g_failures == 0) {

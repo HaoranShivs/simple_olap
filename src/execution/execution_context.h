@@ -45,7 +45,7 @@ struct ExecutionContext {
     // 本条语句的执行模式，由上层（Connection）按需设置。
     ExecutionMode execution_mode = ExecutionMode::AUTO;
 
-    // 并行执行参数（scan 线程数 / compute 线程数 / 批队列容量）。
+    // 并行执行参数（pipeline worker 数 / 结果队列容量）。
     // 由上层（Connection）从 DatabaseConfig 注入，用于对比不同并行配置。
     ParallelConfig parallel_config;
 

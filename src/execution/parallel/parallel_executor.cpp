@@ -9,8 +9,9 @@
 #include <vector>
 
 #include "../../catalog/catalog.h"
+#include "../../memory/query_memory_context/query_memory_context.h"
 #include "../../parallel/queue/bounded_blocking_queue.h"
-#include "../../storage/scan/parallel_scan_session.h"
+#include "../../storage/scan/parallel_scan_state.h"
 #include "../../storage/storage_manager.h"
 #include "../../storage/table/table_storage.h"
 #include "../aggregate/hash_aggregate_state.h"
@@ -37,6 +38,25 @@ const PhysicalSeqScan* FindSeqScanPlan(const PhysicalPlan& plan) {
     default:
         return nullptr;
     }
+}
+
+// pipeline worker 数量 = min(配置上限, 线程池大小, worker Arena 数, segment 数)。
+//
+// segment 数是扫描并行度的天然上界：1 个 segment 最多 1 个 worker 有效，
+// 空表（0 segment）也保留 1 个 worker，保证 global aggregate 仍能产出空聚合行。
+size_t ResolveWorkerCount(const ParallelConfig& config, ThreadPool* pool,
+                          const ParallelScanGlobalState& scan_state, QueryMemoryContext* memory) {
+    size_t count = std::max<size_t>(1, std::min(config.worker_threads, pool->thread_count()));
+
+    if (memory != nullptr && memory->worker_count() > 0) {
+        count = std::min(count, memory->worker_count());
+    }
+
+    if (scan_state.MaxThreads() > 0) {
+        count = std::min(count, scan_state.MaxThreads());
+    }
+
+    return std::max<size_t>(1, count);
 }
 
 } // namespace
@@ -77,6 +97,9 @@ ExecutionResult ParallelExecutor::ExecuteAggregate(const PhysicalHashAggregate& 
     if (ctx_ == nullptr || ctx_->catalog == nullptr || ctx_->storage_manager == nullptr) {
         throw std::runtime_error("ParallelExecutor: missing execution context");
     }
+    if (ctx_->memory == nullptr) {
+        throw std::runtime_error("ParallelExecutor: missing query memory context");
+    }
     if (compute_pool_ == nullptr) {
         throw std::runtime_error("ParallelExecutor: missing compute thread pool");
     }
@@ -105,10 +128,10 @@ ExecutionResult ParallelExecutor::ExecuteAggregate(const PhysicalHashAggregate& 
         throw std::runtime_error("ParallelExecutor: table storage not found: " + std::to_string(scan_spec.table_id));
     }
 
-    // 4. 打开并行扫描：TableStorage::CreateParallelScan(...) -> ParallelScanSession::Start()
-    std::shared_ptr<BatchStream> stream =
-        storage->CreateParallelScan(scan_spec.options, config_.scan_threads, config_.batch_queue_capacity);
-    std::static_pointer_cast<ParallelScanSession>(stream)->Start();
+    // 4. 创建 query-local 并行扫描全局状态：
+    //    快照 segment 列表 + 准备一次谓词计划。不创建线程、不创建队列。
+    std::unique_ptr<ParallelScanGlobalState> scan_state = storage->CreateParallelScanState(scan_spec.options);
+    ParallelScanGlobalState* scan = scan_state.get();
 
     // 5. 编译聚合 spec：只编译一次，所有 worker 只读共享
     //    （ExecExpression::Eval 是 const 且无缓存，跨线程共享安全）。
@@ -116,10 +139,10 @@ ExecutionResult ParallelExecutor::ExecuteAggregate(const PhysicalHashAggregate& 
     BuiltExecutor probe = builder.Build(child_plan);
     BuiltAggregateSpec spec = builder.BuildAggregateSpec(plan, probe.output_schema);
 
-    // 6. 为每条 pipeline 提交一个计算任务，得到 future<HashAggregateState>
-    const size_t worker_count = std::max<size_t>(1, std::min(config_.compute_threads, compute_pool_->thread_count()));
+    // 6. 为每条 pipeline 提交一个 worker 任务，得到 future<HashAggregateState>
+    const size_t worker_count = ResolveWorkerCount(config_, compute_pool_, *scan, ctx_->memory);
 
-    const ExecutorBuildOptions build_options{stream};
+    const ExecutorBuildOptions build_options{scan};
 
     std::vector<std::future<HashAggregateState>> futures;
     futures.reserve(worker_count);
@@ -127,36 +150,42 @@ ExecutionResult ParallelExecutor::ExecuteAggregate(const PhysicalHashAggregate& 
     try {
         for (size_t worker_id = 0; worker_id < worker_count; ++worker_id) {
             futures.push_back(compute_pool_->Submit(
-                [&builder, &child_plan, &build_options, &spec, this, worker_id]() -> HashAggregateState {
-                    // 每条 pipeline：SeqScan(共享 BatchStream) -> Filter -> Projection，
-                    // 聚合由 worker 本地的 HashAggregateState::Consume() 完成
-                    BuiltExecutor pipeline = builder.Build(child_plan, build_options);
-                    pipeline.root->Init();
+                [&builder, &child_plan, build_options, &spec, scan, this, worker_id]() -> HashAggregateState {
+                    try {
+                        // 每条 pipeline 由同一个 worker 连续执行：
+                        // SeqScan(Claim Segment) -> Filter -> Projection -> local Consume
+                        BuiltExecutor pipeline = builder.Build(child_plan, build_options);
+                        pipeline.root->Init();
 
-                    // worker 本地聚合状态进入本 worker 的 memory resource：
-                    // ARENA 模式为 worker Arena（地址在 Query 生命周期内稳定），
-                    // SYSTEM 模式为 new_delete_resource。future move 安全。
-                    std::pmr::memory_resource* resource = ctx_->memory->WorkerResource(worker_id);
+                        // worker 本地聚合状态进入本 worker 的 memory resource：
+                        // ARENA 模式为 worker Arena（地址在 Query 生命周期内稳定），
+                        // SYSTEM 模式为 new_delete_resource。future move 安全。
+                        std::pmr::memory_resource* resource = ctx_->memory->WorkerResource(worker_id);
 
-                    HashAggregateState local(&spec.group_exprs, &spec.agg_calls, resource);
-                    local.set_outputs(&spec.outputs);
+                        HashAggregateState local(&spec.group_exprs, &spec.agg_calls, resource);
+                        local.set_outputs(&spec.outputs);
 
-                    VectorBatch batch(ctx_->buffer_pool);
-                    while (pipeline.root->Next(batch)) {
-                        if (ActiveRowCount(batch) > 0) {
-                            local.Consume(batch);
+                        VectorBatch batch(ctx_->buffer_pool);
+                        while (pipeline.root->Next(batch)) {
+                            if (ActiveRowCount(batch) > 0) {
+                                local.Consume(batch);
+                            }
+                            batch.Reset();
                         }
-                        batch.Reset();
-                    }
 
-                    return local;
+                        return local;
+                    } catch (...) {
+                        // 本 worker 出错：取消扫描，让其他 worker 尽快退出
+                        scan->Cancel();
+                        throw;
+                    }
                 }));
         }
     } catch (...) {
-        // 提交失败：取消扫描（唤醒 scan worker），
-        // 并等待已提交任务结束，避免它们引用即将销毁的栈对象
+        // 提交失败：取消扫描，并等待已提交任务结束，
+        // 避免它们引用即将销毁的栈对象
         std::exception_ptr submit_error = std::current_exception();
-        stream->Cancel();
+        scan->Cancel();
         for (auto& future : futures) {
             try {
                 future.get();
@@ -186,7 +215,7 @@ ExecutionResult ParallelExecutor::ExecuteAggregate(const PhysicalHashAggregate& 
     }
 
     if (error != nullptr) {
-        stream->Cancel();
+        scan->Cancel();
         std::rethrow_exception(error);
     }
 
@@ -216,6 +245,9 @@ ExecutionResult ParallelExecutor::ExecuteQuery(const PhysicalPlan& plan, const B
     if (ctx_ == nullptr || ctx_->catalog == nullptr || ctx_->storage_manager == nullptr) {
         throw std::runtime_error("ParallelExecutor: missing execution context");
     }
+    if (ctx_->memory == nullptr) {
+        throw std::runtime_error("ParallelExecutor: missing query memory context");
+    }
     if (compute_pool_ == nullptr) {
         throw std::runtime_error("ParallelExecutor: missing compute thread pool");
     }
@@ -241,63 +273,74 @@ ExecutionResult ParallelExecutor::ExecuteQuery(const PhysicalPlan& plan, const B
         throw std::runtime_error("ParallelExecutor: table storage not found: " + std::to_string(scan_spec.table_id));
     }
 
-    // 3. 打开并行扫描：scan worker -> 有界队列 -> BatchStream::Next()
-    std::shared_ptr<BatchStream> stream =
-        storage->CreateParallelScan(scan_spec.options, config_.scan_threads, config_.batch_queue_capacity);
-    std::static_pointer_cast<ParallelScanSession>(stream)->Start();
+    // 3. query-local 并行扫描全局状态（同 aggregate 路径）
+    std::unique_ptr<ParallelScanGlobalState> scan_state = storage->CreateParallelScanState(scan_spec.options);
+    ParallelScanGlobalState* scan = scan_state.get();
 
     // 4. 普通构建一次仅为拿到输出 schema（不 Init，不访问存储）。
     //    每个 worker 会用同一个 plan 重建等价的 pipeline。
     BuiltExecutor probe = builder.Build(plan);
     const ExecSchema output_schema = probe.output_schema;
 
-    // 5. 每条 pipeline：SeqScan(共享 BatchStream) -> Filter -> Projection，
+    // 5. 每条 pipeline：SeqScan(Claim Segment) -> Filter -> Projection，
     //    处理后的结果批次推入结果队列，由调用线程消费。
-    const size_t worker_count = std::max<size_t>(1, std::min(config_.compute_threads, compute_pool_->thread_count()));
+    const size_t worker_count = ResolveWorkerCount(config_, compute_pool_, *scan, ctx_->memory);
 
-    const ExecutorBuildOptions build_options{stream};
+    const ExecutorBuildOptions build_options{scan};
 
-    BoundedBlockingQueue<VectorBatch> results(config_.batch_queue_capacity);
+    BoundedBlockingQueue<VectorBatch> results(config_.result_queue_capacity);
     std::atomic<size_t> active_workers{worker_count};
 
     std::vector<std::future<void>> futures;
     futures.reserve(worker_count);
 
+    // 无论正常结束还是异常退出：退出时递减活跃 worker，
+    // 最后一个退出的 worker 关闭结果队列（正常 EOF）。
+    struct WorkerExitGuard {
+        std::atomic<size_t>& active;
+        BoundedBlockingQueue<VectorBatch>& queue;
+
+        ~WorkerExitGuard() {
+            if (active.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                queue.Close();
+            }
+        }
+    };
+
     try {
         for (size_t worker_id = 0; worker_id < worker_count; ++worker_id) {
-            futures.push_back(compute_pool_->Submit(
-                [&builder, &plan, &build_options, &results, &active_workers, this, worker_id]() -> void {
-                    try {
-                        BuiltExecutor pipeline = builder.Build(plan, build_options);
-                        pipeline.root->Init();
+            futures.push_back(compute_pool_->Submit([&builder, &plan, build_options, scan, &results, &active_workers,
+                                                     this]() -> void {
+                WorkerExitGuard exit_guard{active_workers, results};
 
-                        VectorBatch batch(ctx_->buffer_pool);
-                        while (pipeline.root->Next(batch)) {
-                            if (ActiveRowCount(batch) > 0) {
-                                // 队列满时阻塞（背压）；Cancel/Abort 后 Push 返回 false
-                                if (!results.Push(std::move(batch))) {
-                                    return;
-                                }
+                try {
+                    BuiltExecutor pipeline = builder.Build(plan, build_options);
+                    pipeline.root->Init();
+
+                    VectorBatch batch(ctx_->buffer_pool);
+                    while (pipeline.root->Next(batch)) {
+                        if (ActiveRowCount(batch) > 0) {
+                            // 结果队列是唯一的交接边界；队列满时阻塞（背压）。
+                            // Cancel/Abort 后 Push 返回 false。
+                            if (!results.Push(std::move(batch))) {
+                                scan->Cancel();
+                                return;
                             }
-                            batch = VectorBatch{ctx_->buffer_pool};
                         }
-                    } catch (...) {
-                        // 处理异常：唤醒消费侧，并唤醒其他阻塞在 Push 上的 worker
-                        results.Abort(std::current_exception());
-                        return;
+                        batch = VectorBatch{ctx_->buffer_pool};
                     }
-
-                    // 最后一个退出的 worker 关闭结果队列（正常 EOF）
-                    if (active_workers.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                        results.Close();
-                    }
-                }));
+                } catch (...) {
+                    // 处理异常：取消扫描，唤醒消费侧与其他阻塞 worker
+                    scan->Cancel();
+                    results.Abort(std::current_exception());
+                }
+            }));
         }
     } catch (...) {
         // 提交失败：取消扫描与结果队列，并等待已提交任务结束，
         // 避免它们继续引用本函数栈上的对象
         std::exception_ptr submit_error = std::current_exception();
-        stream->Cancel();
+        scan->Cancel();
         results.Cancel();
         for (auto& future : futures) {
             try {
@@ -342,7 +385,7 @@ ExecutionResult ParallelExecutor::ExecuteQuery(const PhysicalPlan& plan, const B
     }
 
     if (error != nullptr) {
-        stream->Cancel();
+        scan->Cancel();
         std::rethrow_exception(error);
     }
 

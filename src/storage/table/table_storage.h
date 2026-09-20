@@ -11,7 +11,7 @@
 #include "../datachunk.h"
 #include "../datastructs.h"
 #include "../index/key_encoder.h"
-#include "../scan/batch_stream.h"
+#include "../scan/parallel_scan_state.h"
 #include "../scan/storage_predicate.h"
 #include "../scan_request.h"
 #include "../segment/segment.h"
@@ -78,12 +78,19 @@ class TableStorage {
     // 返回 false 表示本 segment 已读完（或被 metadata pruning 跳过）。
     bool ScanSegment(SegmentReader* reader, const ScanOptions& options, SegmentScanCursor& cursor, VectorBatch& output);
 
-    // 并行扫描入口：创建 ParallelScanSession（BatchStream）。
-    // 调用方 Start() 后通过 BatchStream::Next() 拉取批次；
-    // scan 线程在 storage 内部由 session 管理（atomic next_segment 分配）。
-    // scan worker 产出的 VectorBatch 绑定本表持有的 BufferPool。
-    std::shared_ptr<BatchStream> CreateParallelScan(const ScanOptions& options, size_t scan_threads,
-                                                    size_t queue_capacity);
+    // 并行扫描入口（morsel-driven，query-local）：
+    // 为一条查询创建全局扫描状态，快照 segment 列表并准备一次谓词计划。
+    // 调用方（ParallelExecutor）把状态共享给 N 个 pipeline worker，
+    // 每个 worker 用各自的 ParallelScanLocalState 调用 ScanParallel()。
+    std::unique_ptr<ParallelScanGlobalState> CreateParallelScanState(const ScanOptions& options);
+
+    // 并行扫描单个 batch：worker 未持有 segment 时原子领取一个，
+    // 并沿该 segment 连续扫描（ScanSegment）；扫完后自动领取下一个。
+    // 返回 false 表示所有 segment 已扫完或被取消。
+    // 多个 worker 可以并发调用同一 global_state，各自持有 local_state。
+    // 产出的 VectorBatch 绑定本表持有的 BufferPool。
+    bool ScanParallel(const ScanOptions& options, ParallelScanGlobalState& global_state,
+                      ParallelScanLocalState& local_state, VectorBatch& output);
 
     // ---------- 键索引 ----------
 
